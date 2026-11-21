@@ -330,6 +330,19 @@ def _wait_for_old_aura(argv) -> bool:
     return True
 
 
+def _latest_commit(repo: str, branch: str) -> str:
+    """Newest commit id of a public repo, or "". GitHub keeps branch files for about 5 minutes, but this answer
+    is never cached, and files read at an exact commit are always the newest."""
+    try:
+        import requests
+        r = requests.get("https://github.com/{}.git/info/refs?service=git-upload-pack".format(repo), timeout=10)
+        m = re.search(rb"([0-9a-f]{40}) refs/heads/" + re.escape(branch.encode()) + rb"(?=[\n\x00])", r.content)
+        return m.group(1).decode() if m else ""
+    except Exception as exc:
+        _log("latest commit lookup failed: " + repr(exc))
+        return ""
+
+
 def _github_headers(token: str) -> dict:
     headers = {"Accept": "application/vnd.github.raw"}
     if token:
@@ -1307,7 +1320,8 @@ class Api:
                 url = "https://api.github.com/repos/{}/contents/VERSION?ref={}".format(repo, branch)
             else:  # public repo: plain file links have no strict request limit (the API allows only 60 an hour per home)
                 # a changing query keeps GitHub's 5-minute file cache from hiding a brand-new version
-                url = "https://raw.githubusercontent.com/{}/{}/VERSION?t={}".format(repo, branch, int(time.time()))
+                ref = _latest_commit(repo, branch) or branch
+                url = "https://raw.githubusercontent.com/{}/{}/VERSION?t={}".format(repo, ref, int(time.time()))
             hdrs = _github_headers(cfg.get("token", ""))
             hdrs["Cache-Control"] = "no-cache"
             resp = requests.get(url, headers=hdrs, timeout=15)
@@ -1336,7 +1350,9 @@ class Api:
             if cfg.get("token"):
                 url = "https://api.github.com/repos/{}/zipball/{}".format(repo, cfg.get("branch", "main"))
             else:
-                url = "https://github.com/{}/archive/refs/heads/{}.zip".format(repo, cfg.get("branch", "main"))
+                ref = _latest_commit(repo, cfg.get("branch", "main"))
+                url = ("https://github.com/{}/archive/{}.zip".format(repo, ref) if ref
+                       else "https://github.com/{}/archive/refs/heads/{}.zip".format(repo, cfg.get("branch", "main")))
             resp = requests.get(url, headers=_github_headers(cfg.get("token", "")), timeout=60)
             resp.raise_for_status()
             files = {}
