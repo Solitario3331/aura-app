@@ -34,13 +34,16 @@ else:
 sys.path.insert(0, str(ROOT / "src"))
 
 import chat_store
+import live_state
 import no_window
+import ollama_addr
 import updater
 from aura_events import Translator
 from aura_mask import mask_names
-from chat_context import build_context
+from chat_context import build_context, strip_tag
 from frame_policy import can_embed
 from site_finder import newest_html
+from step_text import claude_step
 from tool_kind import tool_kind_from_line
 from url_input import normalize_input
 
@@ -61,6 +64,15 @@ POLISH_MODEL = "claude-opus-5-5"        # Polish mode
 
 MODES = ("claude", "qwen", "auto", "big", "polish")
 IDLE_STOP_SECONDS = 20 * 60             # stop a chat's background process after 20 idle minutes
+LOCAL_TIMEOUT = 8 * 60                  # Local/Quick: no answer after 8 minutes -> stop and say so
+LOCAL_DEADLINE = LOCAL_TIMEOUT - 60     # the local helper itself wraps up (short summary) a minute before that
+CLAUDE_TIMEOUTS = {"auto": 10 * 60, "big": 30 * 60, "polish": 20 * 60, "claude": 10 * 60}
+AURA_SILENT_SECONDS = 15 * 60           # Aura mode: a turn with no sign of life for 15 minutes is stopped
+PROGRESS_PREFIX = "@@aura "             # live step lines from agent.py (never shown as text)
+WORKING_ELSEWHERE = "This chat is still working. Wait for it to finish, or press Stop."
+CHIP_TEXT = {"read": "Read files", "search": "Searched", "edit": "Edited files", "run": "Ran a command",
+             "work": "Completed a task", "build": "Built and tested", "web": "Looked something up",
+             "plan": "Planned the steps"}
 PICS_KEEP_SECONDS = 2 * 86400
 MAX_ARG_CHARS = 30000                   # Windows command lines are limited to ~32k characters
 SITE_SKIP = ("node_modules", "vendor", "__pycache__", "venv", "site-packages")
@@ -140,10 +152,12 @@ def _friendly(text: str) -> str:
     if short and "ollama took too long" in low:
         _log("local helper slow: " + text[-500:])
         return "Aura's local helper is very busy right now. Please try again in a few minutes."
+    if short and "ollama returned an error" in low:
+        _log("local helper error: " + text[-500:])
+        return "Aura's local helper had a problem with this request. Please try again in a moment."
     if "11434" in low or ("ollama" in low and ("connect" in low or "refused" in low or "not found" in low)):
         _log("local helper unreachable: " + text[-500:])
-        if os.environ.get("OLLAMA_URL", "").lower().startswith(("http://localhost", "http://127.")) \
-                or not (ROOT / "ollama_url.txt").exists():
+        if ollama_addr.is_this_pc(ollama_addr.read_address(ROOT)):
             return "Aura's local helper is not running on this PC. Start Ollama (or restart the PC), then try again."
         return "Can't reach Amar's PC (the one with the big graphics card). Is it on? Then try again."
     if "traceback (most recent call last)" in low:
@@ -156,6 +170,9 @@ def _clean_env() -> dict:
     """Environment for helper programs: no settings leaking in from a parent Claude session."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_CODE", "CLAUDECODE", "QWEN_MODEL"))}
     env.update(AURA_APP="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    env.setdefault("AGENT_DEADLINE", "540")   # a local task started by Aura mode (do.bat) wraps up within 9 minutes
+    for k in ("AURA_PROGRESS",):               # live step lines only where the app asks for them
+        env.pop(k, None)
     return env
 
 
@@ -169,22 +186,22 @@ CHILD_PY = no_window.child_python()     # python.exe, never pythonw.exe: pythonw
 
 def _kill_tree(proc) -> None:
     """Stop a helper process and everything it started (Windows keeps children alive otherwise)."""
-    try:
-        if proc.stdin:
-            proc.stdin.close()
-    except Exception:
-        pass
-    if proc.poll() is not None:
-        return
-    try:
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10, **_hidden())
-    except Exception:
-        pass
-    try:
-        if proc.poll() is None:
-            proc.terminate()
-    except Exception:
-        pass
+    no_window.kill_tree(proc)
+
+
+# Chat files are read and written from several threads (a chat answering in the background while the page
+# loads another one): one lock keeps every read-modify-write whole.
+_STORE = threading.RLock()
+
+
+def _store_add(sid, role, text) -> None:
+    with _STORE:
+        chat_store.add_message(CHATS_DIR, sid, role, text)
+
+
+def _store_load(sid) -> dict:
+    with _STORE:
+        return chat_store.load_session(CHATS_DIR, sid)
 
 
 def _read_text(path: Path) -> str:
@@ -241,7 +258,8 @@ def _prune_old_pictures() -> None:
 def _history(sid, since_tag=None) -> str:
     """What was already said in this chat (maybe in another mode), so the current mode knows."""
     try:
-        messages = chat_store.load_session(CHATS_DIR, sid)["messages"]
+        messages = [m for m in _store_load(sid)["messages"]   # Aura's own notes/errors are not conversation
+                    if not (m.get("role") == "assistant" and strip_tag(m.get("text", ""))[0] in ("App", "Note"))]
         return build_context(messages, since_tag=since_tag) if since_tag else build_context(messages)
     except Exception:
         return ""
@@ -367,27 +385,30 @@ def _claude_project_dir() -> Path:
     return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(ROOT))
 
 
-def run_claude(prompt, model, extra=None):
-    """One-shot answer (Big project, Polish, Quick fallback). Returns None when Claude is not installed."""
+def run_claude(prompt, model, extra=None, timeout=1800, should_stop=None):
+    """One-shot answer (Big project, Polish, Quick fallback). Returns None when Claude is not installed.
+    Never hangs: the whole process tree is stopped on timeout or when should_stop() says so."""
     exe = shutil.which("claude")
     if exe is None:
         return None
     try:
-        proc = subprocess.run(
+        out, err, code, reason = no_window.run_capture(
             [exe, "-p", "--model", model, "--permission-mode", "acceptEdits",
              "--append-system-prompt", AURA_PERSONA, "--allowedTools"] + ONE_SHOT_ALLOWED + (extra or []),
-            input=prompt, cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=1800, env=_clean_env(), **_hidden())
-        out = (proc.stdout or "").strip()
+            timeout, cwd=str(ROOT), env=_clean_env(), input_text=prompt, should_stop=should_stop)
+        if reason == "stopped":
+            return "Stopped."
+        if reason == "timeout":
+            _log("claude -p ({}) stopped after {} s".format(model, timeout))
+            return "Aura took too long ({} minutes) and stopped. Try a smaller request.".format(int(timeout // 60))
+        out = (out or "").strip()
         if out:
-            return _friendly(out)
-        err = (proc.stderr or "").strip()
+            return NOT_SIGNED_IN if _needs_login(out) else _friendly(out)
+        err = (err or "").strip()
         if err:
-            _log("claude -p stderr (exit {}): {}".format(proc.returncode, err[-3000:]))
+            _log("claude -p stderr (exit {}): {}".format(code, err[-3000:]))
             return NOT_SIGNED_IN if _needs_login(err) else TRY_AGAIN
         return "No answer."
-    except subprocess.TimeoutExpired:
-        return "Aura took too long and stopped. Try a smaller request."
     except Exception as exc:
         _log("run_claude failed: " + repr(exc))
         return TRY_AGAIN
@@ -529,8 +550,11 @@ def _start_control(api_obj):
 class Api:
     def __init__(self):
         # Everything private starts with "_" so the page never sees it.
-        self._chats = {}                     # sid -> running chat process state
+        self._chats = {}                     # sid -> running chat process state (Aura mode)
         self._chats_lock = threading.Lock()
+        self._jobs = {}                      # sid -> one-shot job state (Quick, Local, Big project, Polish)
+        self._jobs_lock = threading.Lock()
+        self._local_lock = threading.Lock()  # one local-helper task at a time (one graphics card)
         self._reaper_on = False
         self._handoff_busy = set()
         self._handoff_lock = threading.Lock()
@@ -560,7 +584,8 @@ class Api:
 
     def list_sessions(self) -> list:
         try:
-            return chat_store.list_sessions(CHATS_DIR)
+            with _STORE:
+                return chat_store.list_sessions(CHATS_DIR)
         except Exception as exc:
             _log("list_sessions failed: " + repr(exc))
             return []
@@ -568,22 +593,70 @@ class Api:
     def new_session(self) -> str:
         """A new empty chat. Returns its id, or "" if it could not be created."""
         try:
-            return chat_store.new_session(CHATS_DIR)
+            with _STORE:
+                return chat_store.new_session(CHATS_DIR)
         except Exception as exc:
             _log("new_session failed: " + repr(exc))
             return ""
 
     def load_session(self, sid) -> dict:
         try:
-            return chat_store.load_session(CHATS_DIR, sid)
+            return _store_load(sid)
         except Exception as exc:
             _log("load_session failed: " + repr(exc))
             return {"messages": [], "error": True}
 
+    def open_chat(self, sid) -> dict:
+        """A chat's messages plus, if it is still working, its live state (text so far, step lines, phase).
+        Taken in one go under the chat's lock, so nothing is shown twice or lost when the answer finishes
+        right at this moment. Waiting events of that chat are dropped (the snapshot replaces them)."""
+        try:
+            sid = str(sid)
+            with self._chats_lock:
+                st = self._chats.get(sid)
+            with self._jobs_lock:
+                job = self._jobs.get(sid)
+            for state, kind in ((st, "aura"), (job, "job")):
+                if not state:
+                    continue
+                with state["lock"]:
+                    if state.get("busy"):
+                        data = _store_load(sid)
+                        del state["events"][:]
+                        data["run"] = {"kind": kind, "mode": state.get("mode", "claude"),
+                                       "elapsed": max(0.0, time.time() - state.get("started", time.time())),
+                                       "phase": state.get("phase") or "think",
+                                       "items": live_state.snapshot(state["live"])}
+                        return data
+            data = _store_load(sid)
+            data["run"] = None
+            return data
+        except Exception as exc:
+            _log("open_chat failed: " + repr(exc))
+            return {"messages": [], "error": True, "run": None}
+
+    def busy_chats(self) -> list:
+        """Ids of chats that are working right now (the chat list shows a small indicator on them)."""
+        try:
+            with self._chats_lock:
+                out = [sid for sid, st in self._chats.items() if st.get("busy")]
+            with self._jobs_lock:
+                out += [sid for sid, j in self._jobs.items() if j.get("busy") and sid not in out]
+            return out
+        except Exception:
+            return []
+
     def delete_session(self, sid) -> bool:
         try:
-            self.chat_stop(sid)
-            ok = chat_store.delete_session(CHATS_DIR, sid)
+            sid = str(sid)
+            self._stop_chat(sid)
+            self._stop_job(sid, quiet=True)
+            with self._chats_lock:
+                self._chats.pop(sid, None)
+            with self._jobs_lock:
+                self._jobs.pop(sid, None)
+            with _STORE:
+                ok = chat_store.delete_session(CHATS_DIR, sid)
             if ok:
                 for ext in (".claude", ".summary", ".site"):
                     _unlink(_side_file(sid, ext))
@@ -598,7 +671,7 @@ class Api:
         """Delete every chat. Returns how many were removed."""
         n = 0
         try:
-            for s in chat_store.list_sessions(CHATS_DIR):
+            for s in self.list_sessions():
                 if self.delete_session(s.get("id")):
                     n += 1
         except Exception as exc:
@@ -633,7 +706,7 @@ class Api:
         """Save one chat as a text file (the user picks where)."""
         try:
             import webview
-            data = chat_store.load_session(CHATS_DIR, sid)
+            data = _store_load(sid)
             msgs = data.get("messages") or []
             if not msgs:
                 return {"status": "This chat is empty."}
@@ -719,12 +792,32 @@ class Api:
             return {"max": False}
 
     def win_close(self) -> None:
+        """Close Aura: extra windows first (one that is still being created cannot be closed and used to stop
+        the loop before the main window), the main window last; if it still runs after 6 s, end the process."""
         try:
             import webview
-            for win in list(webview.windows):
-                win.destroy()
+            wins = list(webview.windows)
         except Exception as exc:
             _log("win_close failed: " + repr(exc))
+            wins = []
+        guard = threading.Timer(6.0, self._force_exit)
+        guard.daemon = True
+        guard.start()
+        main_win = next((w for w in wins if getattr(w, "title", "") == "Aura"), wins[0] if wins else None)
+        for win in [w for w in wins if w is not main_win] + ([main_win] if main_win is not None else []):
+            try:
+                win.destroy()
+            except Exception as exc:
+                _log("win_close: could not close '{}': {!r}".format(getattr(win, "title", "?"), exc))
+        if main_win is None:
+            self._force_exit()
+
+    def _force_exit(self):
+        _log("closing: window did not close by itself, ending Aura")
+        try:
+            self._shutdown()
+        finally:
+            os._exit(0)
 
     # ---- websites Aura builds (shown in the browser pane) ----
     def _site_roots(self):
@@ -921,49 +1014,187 @@ class Api:
 
     # ---- one-shot modes: Quick, Local, Big project, Polish ----
     def send_message(self, sid, text, mode="auto", images=None) -> dict:
+        """Old all-in-one call (waits for the answer). The page now uses job_start/job_poll instead, so it can
+        show live steps and switch chats; this stays for older pages and quick tests."""
         try:
-            text = text or ""
-            images = _valid_pictures(images)
-            context = _history(sid)
-            chat_store.add_message(CHATS_DIR, sid, "user", _user_line(text, images))
-            if context and text.strip() and not images:  # with a picture, earlier answers must not get in the way
-                text = context + "New request from the user: " + text
-            if mode not in MODES:
-                mode = "claude"
-
-            if mode in ("qwen", "auto"):
-                reply, who = self._ask_local(text, images), "Qwen"
-                if mode == "auto" and self._local_failed(reply):
-                    reply, who = self._one_shot(
-                        "Qwen could not do this task, do it yourself and follow CLAUDE.md: " + text, HELPER_MODEL, "Claude")
-            elif mode == "big":
-                reply, who = self._one_shot(
-                    "BIG PROJECT. Follow the CLAUDE.md workflow (specs, tests, runner.py, Qwen for small pieces): " + text,
-                    HELPER_MODEL, "Claude")
-            elif mode == "polish":
-                reply, who = self._polish(sid, text)
-            else:
-                reply, who = self._one_shot(text, AURA_MODEL, "Claude", _claude_session(sid))
-
-            reply = reply or "No answer."
-            chat_store.add_message(CHATS_DIR, sid, "assistant", "[" + who + "] " + reply)
-            return {"reply": reply, "who": who}
+            sid = str(sid)
+            if self._chat_working(sid):
+                return {"reply": WORKING_ELSEWHERE, "who": "App", "error": True}
+            text, images, mode = self._begin_turn(sid, text, mode, images)
+            reply, who = self._answer(sid, text, mode, images, None)
+            failed = who == "App"
+            self._save_answer(sid, reply, who)
+            return {"reply": reply, "who": who, "error": failed} if failed else {"reply": reply, "who": who}
         except Exception as exc:
             _log("send_message failed: " + repr(exc))
             return {"reply": INTERNAL_ERROR, "who": "App", "error": True}
 
+    def _begin_turn(self, sid, text, mode, images):
+        """Save the user's message; return (prompt with earlier context, pictures, mode)."""
+        text = str(text or "")
+        images = _valid_pictures(images)
+        context = _history(sid)
+        _store_add(sid, "user", _user_line(text, images))
+        if context and text.strip() and not images:  # with a picture, earlier answers must not get in the way
+            text = context + "New request from the user: " + text
+        return text, images, (mode if mode in MODES else "claude")
+
+    def _answer(self, sid, text, mode, images, job):
+        """Do the work for one message. Returns (reply, who); who == "App" means a failure message."""
+        stop = (lambda: job["stopped"]) if job else None
+        if mode in ("qwen", "auto"):
+            reply = self._ask_local(text, images, job)
+            if job and job["stopped"]:
+                return "Stopped.", "Note"
+            if mode == "auto" and self._local_failed(reply):
+                self._job_event(job, {"t": "step", "kind": "work", "text": "Getting extra help"})
+                reply, who = self._one_shot("Qwen could not do this task, do it yourself and follow CLAUDE.md: " + text,
+                                            HELPER_MODEL, "Claude", None, CLAUDE_TIMEOUTS["auto"], stop)
+            else:
+                who = "Qwen"
+            if reply.startswith("Error:"):
+                return reply[6:].strip() or TRY_AGAIN, "App"
+            return reply, who
+        if mode == "big":
+            return self._one_shot(
+                "BIG PROJECT. Follow the CLAUDE.md workflow (specs, tests, runner.py, Qwen for small pieces): " + text,
+                HELPER_MODEL, "Claude", None, CLAUDE_TIMEOUTS["big"], stop)
+        if mode == "polish":
+            return self._polish(sid, text, stop)
+        return self._one_shot(text, AURA_MODEL, "Claude", _claude_session(sid), CLAUDE_TIMEOUTS["claude"], stop)
+
     @staticmethod
-    def _one_shot(prompt, model, who, extra=None):
-        reply = run_claude(prompt, model, extra)
-        return (NOT_SET_UP, "App") if reply is None else (reply, who)
+    def _save_answer(sid, reply, who) -> None:
+        try:
+            _store_add(sid, "assistant", "[" + who + "] " + (reply or "No answer."))
+        except KeyError:
+            pass  # the chat was deleted meanwhile
+        except Exception as exc:
+            _log("could not save the answer: " + repr(exc))
+
+    @staticmethod
+    def _one_shot(prompt, model, who, extra=None, timeout=1800, stop=None):
+        reply = run_claude(prompt, model, extra, timeout, stop)
+        if reply is None:
+            return NOT_SET_UP, "App"
+        if reply in (NOT_SIGNED_IN, TRY_AGAIN, INTERNAL_ERROR) or reply.startswith("Aura took too long"):
+            return reply, "App"
+        if reply == "Stopped.":
+            return reply, "Note"
+        return reply, who
 
     @staticmethod
     def _local_failed(reply) -> bool:
         return (not reply or reply.startswith(("Stopped:", "Error", "No answer", "Aura's local helper is not reachable")))
 
-    def _ask_local(self, text, images) -> str:
-        """Run the local assistant (agent.py). Failures come back as text starting with 'Error: '."""
-        img_dir, img_args = None, []
+    # ---- background jobs: the page starts one, polls its events, can leave the chat and come back ----
+    def _chat_working(self, sid) -> bool:
+        with self._chats_lock:
+            st = self._chats.get(sid)
+        with self._jobs_lock:
+            job = self._jobs.get(sid)
+        return bool((st and st.get("busy")) or (job and job.get("busy")))
+
+    def job_start(self, sid, text, mode="auto", images=None) -> dict:
+        """Start Quick / Local / Big project / Polish for this chat in the background. Returns {"ok": True}
+        at once; the answer arrives through job_poll (and is saved into this chat, whichever chat is open)."""
+        try:
+            sid = str(sid)
+            if not sid.isalnum():
+                return {"ok": False, "error": INTERNAL_ERROR}
+            with self._chats_lock:
+                st = self._chats.get(sid)
+                aura_busy = bool(st and st.get("busy"))
+            with self._jobs_lock:
+                old = self._jobs.get(sid)
+                if aura_busy or (old and old.get("busy")):
+                    return {"ok": False, "error": WORKING_ELSEWHERE}
+                job = {"busy": True, "stopped": False, "proc": None, "mode": mode, "started": time.time(),
+                       "phase": "think", "events": [], "live": [], "lock": threading.Lock()}
+                self._jobs[sid] = job
+            try:
+                text, images, mode = self._begin_turn(sid, text, mode, images)
+            except Exception as exc:
+                _log("job_start could not save the message: " + repr(exc))
+                with self._jobs_lock:
+                    if self._jobs.get(sid) is job:
+                        del self._jobs[sid]
+                return {"ok": False, "error": "This chat could not be saved. Please start a new chat."}
+            job["mode"] = mode
+            job["phase"] = {"big": "big", "polish": "polish"}.get(mode, "look" if images else "think")
+            threading.Thread(target=self._run_job, args=(sid, job, text, mode, images), daemon=True).start()
+            return {"ok": True}
+        except Exception as exc:
+            _log("job_start failed: " + repr(exc))
+            return {"ok": False, "error": CANT_START}
+
+    def _run_job(self, sid, job, text, mode, images):
+        reply, who = INTERNAL_ERROR, "App"
+        try:
+            reply, who = self._answer(sid, text, mode, images, job)
+            reply = reply or "No answer."
+        except Exception as exc:
+            _log("job failed: " + repr(exc))
+        if job["stopped"]:
+            reply, who = "Stopped.", "Note"
+        with job["lock"]:  # saving + "done" together, so open_chat never sees one without the other
+            self._save_answer(sid, reply, who)
+            job["busy"] = False
+            ev = {"t": "done", "text": reply, "error": who == "App", "note": who == "Note"}
+            live_state.apply(job["live"], ev)
+            live_state.push(job["events"], ev)
+
+    def _job_event(self, job, ev) -> None:
+        if not job:
+            return
+        if isinstance(ev.get("text"), str):
+            ev["text"] = mask_names(ev["text"])[:200]
+        with job["lock"]:
+            if ev.get("t") == "phase":
+                job["phase"] = ev.get("kind") or "think"
+            elif ev.get("t") == "step":
+                job["phase"] = ev.get("kind") or "work"
+            live_state.apply(job["live"], ev)
+            live_state.push(job["events"], ev)
+
+    def job_poll(self, sid) -> list:
+        """New events of this chat's job (JSON strings, same shape as chat_poll)."""
+        try:
+            with self._jobs_lock:
+                job = self._jobs.get(str(sid))
+            if not job:
+                return []
+            with job["lock"]:
+                out, job["events"] = job["events"], []
+            return [json.dumps(e) for e in out]
+        except Exception:
+            return []
+
+    def job_stop(self, sid) -> bool:
+        return self._stop_job(str(sid))
+
+    def _stop_job(self, sid, quiet=False) -> bool:
+        try:
+            with self._jobs_lock:
+                job = self._jobs.get(sid)
+            if not job or not job.get("busy"):
+                return False
+            job["stopped"] = True
+            proc = job.get("proc")
+            if proc is not None:
+                _kill_tree(proc)
+            if not quiet:
+                _log("job for chat {} stopped by the user".format(sid))
+            return True
+        except Exception as exc:
+            _log("job_stop failed: " + repr(exc))
+            return False
+
+    def _ask_local(self, text, images, job=None) -> str:
+        """Run the local assistant (agent.py). Failures come back as text starting with 'Error: '.
+        Streams its step lines into the job, never runs longer than LOCAL_TIMEOUT, and only one local task
+        runs at a time (others wait, and say so)."""
+        img_dir, img_args, got_lock = None, [], False
         try:
             if images:
                 img_dir = tempfile.mkdtemp(prefix="aura_img_")
@@ -973,29 +1204,70 @@ class Api:
                         "description; describe what this picture itself shows. " + (text.strip() or "Describe this picture."))
             if len(text) > MAX_ARG_CHARS:
                 return "Error: That message is too long for this mode. Please shorten it, or use Aura mode."
-            proc = subprocess.run(
-                [CHILD_PY, str(ROOT / "agent.py"), text] + img_args,
-                cwd=str(ROOT), env=_clean_env(), capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=900, **_hidden())
-            out = (proc.stdout or "").strip()
+            if not self._local_lock.acquire(blocking=False):
+                self._job_event(job, {"t": "phase", "kind": "wait"})
+                waited = time.time()
+                while not self._local_lock.acquire(timeout=0.5):
+                    if job and job["stopped"]:
+                        return "Stopped."
+                    if time.time() - waited > LOCAL_TIMEOUT:
+                        return "Error: Aura's local helper is still busy with another chat. Please try again later."
+                self._job_event(job, {"t": "phase", "kind": "look" if images else "think"})
+            got_lock = True
+            if job and job["stopped"]:
+                return "Stopped."
+            env = _clean_env()
+            env.update(AURA_PROGRESS="1", AGENT_DEADLINE=str(LOCAL_DEADLINE), PYTHONUNBUFFERED="1")
+
+            def on_line(line):
+                if line.startswith(PROGRESS_PREFIX):
+                    try:
+                        ev = json.loads(line[len(PROGRESS_PREFIX):])
+                    except ValueError:
+                        return
+                    if isinstance(ev, dict) and ev.get("t") in ("step", "phase"):
+                        self._job_event(job, ev)
+
+            def on_start(proc):
+                if job:
+                    job["proc"] = proc
+                    if job["stopped"]:  # Stop was pressed while it was starting
+                        _kill_tree(proc)
+
+            out, err, code, reason = no_window.run_capture(
+                [CHILD_PY, str(ROOT / "agent.py"), text] + img_args, LOCAL_TIMEOUT, cwd=str(ROOT), env=env,
+                on_line=on_line if job else None, on_start=on_start,
+                should_stop=(lambda: job["stopped"]) if job else None)
+            if reason == "stopped":
+                return "Stopped."
+            if reason == "timeout":
+                _log("agent.py stopped after {} s".format(LOCAL_TIMEOUT))
+                return ("Error: Aura got no answer within {} minutes, so it stopped. The helper PC may be busy; "
+                        "try again, or try a smaller request.".format(LOCAL_TIMEOUT // 60))
+            out = "\n".join(ln for ln in (out or "").splitlines()
+                            if not STEP_LINE.match(ln) and not ln.startswith(PROGRESS_PREFIX)).strip()
             if not out:
-                err = (proc.stderr or "").strip()
+                err = (err or "").strip()
                 if err:
-                    _log("agent.py stderr (exit {}): {}".format(proc.returncode, err[-3000:]))
+                    _log("agent.py stderr (exit {}): {}".format(code, err[-3000:]))
                     return "Error: " + _friendly(err[-6000:])
-                return "No answer."
-            out = "\n".join(ln for ln in out.splitlines() if not STEP_LINE.match(ln)).strip() or "Done."
+                if code:
+                    _log("agent.py exited with code {} and no output".format(code))
+                    return "Error: " + TRY_AGAIN
+                return "Done."
             return _friendly(out[-6000:])
-        except subprocess.TimeoutExpired:
-            return "Error: Aura took too long. Try a smaller request."
         except Exception as exc:
             _log("agent.py failed: " + repr(exc))
             return "Error: Aura's local helper could not start."
         finally:
+            if got_lock:
+                self._local_lock.release()
+            if job:
+                job["proc"] = None
             if img_dir:
                 shutil.rmtree(img_dir, ignore_errors=True)
 
-    def _polish(self, sid, text):
+    def _polish(self, sid, text, stop=None):
         """Polish edits the website of this chat (or else the newest one), even outside the project folder."""
         extra, site_note = [], ""
         try:
@@ -1014,7 +1286,7 @@ class Api:
         prompt = ("FINAL POLISH, one pass only: " + text + ". Make the project more modern, professional and solid"
                   " (design/UX, structure, error handling, speed, small bugs). Focused edits only inside this folder,"
                   " never delete files, confirm nothing broke, reply in 3-5 lines." + site_note)
-        return self._one_shot(prompt, POLISH_MODEL, "Opus", extra)
+        return self._one_shot(prompt, POLISH_MODEL, "Opus", extra, CLAUDE_TIMEOUTS["polish"], stop)
 
     # ---- updates ----
     def check_update(self) -> dict:
@@ -1201,8 +1473,9 @@ class Api:
             except OSError as exc:
                 _log("could not start chat process: " + repr(exc))
                 return None
-            st = {"proc": proc, "events": [], "lock": threading.Lock(), "stopped": False, "busy": False,
-                  "last": time.time()}
+            st = {"proc": proc, "events": [], "live": [], "lock": threading.Lock(), "stopped": False,
+                  "busy": False, "last": time.time(), "started": time.time(), "phase": "think", "mode": "claude",
+                  "tr": Translator(), "noise": []}
             self._chats[sid] = st
             if not self._reaper_on:
                 self._reaper_on = True
@@ -1210,31 +1483,42 @@ class Api:
         threading.Thread(target=self._read_chat, args=(sid, st), daemon=True).start()
         return st
 
-    def _read_chat(self, sid, st):
-        """Turn the process output into small events for the page (picked up by chat_poll)."""
-        proc, tr, noise = st["proc"], Translator(), []
+    @staticmethod
+    def _publish(st, events) -> None:
+        """Add events to the chat's live picture and waiting queue (caller holds st["lock"])."""
+        for ev in events:
+            t = ev.get("t")
+            if t in ("tool", "step"):
+                st["phase"] = ev.get("kind") or "work"
+            elif t == "text":
+                st["phase"] = "write"
+            live_state.apply(st["live"], ev)
+            live_state.push(st["events"], ev)
+        st["last"] = time.time()
 
-        def emit(line):
+    def _read_chat(self, sid, st):
+        """Turn the process output into small events for the page (picked up by chat_poll). The reply is saved
+        into THIS chat when the turn ends, whichever chat the page shows."""
+        proc, tr, noise = st["proc"], st["tr"], st["noise"]
+
+        def translate(line):
             try:
-                events = tr.feed(line)
+                events = tr.feed(line) or []
             except Exception as exc:
                 _log("chat event error: " + repr(exc))
                 return []
-            for ev in events or []:
-                if ev.get("t") == "done" and ev.get("error") and _needs_login(ev.get("text", "")):
-                    ev["text"] = NOT_SIGNED_IN
-            if events:
-                try:
-                    kind = tool_kind_from_line(line)
-                except Exception:
-                    kind = None
-                if kind:
-                    for ev in events:
-                        if ev.get("t") == "tool":
-                            ev["kind"] = kind
-                with st["lock"]:
-                    st["events"].extend(json.dumps(ev) for ev in events)
-                st["last"] = time.time()
+            for ev in events:
+                if ev.get("t") == "done" and ev.get("error"):
+                    raw_text = ev.get("text", "")
+                    ev["text"] = NOT_SIGNED_IN if _needs_login(raw_text) else (_friendly(raw_text) or TRY_AGAIN)
+                elif ev.get("t") == "tool":
+                    try:
+                        kind = tool_kind_from_line(line)
+                        label = claude_step(line)
+                    except Exception:
+                        kind, label = None, None
+                    ev["kind"] = (label or {}).get("kind") or kind or "work"
+                    ev["text"] = (label or {}).get("text") or CHIP_TEXT.get(ev["kind"], "Completed a task")
             return events
 
         try:
@@ -1242,46 +1526,124 @@ class Api:
                 line = raw.strip()
                 if not line:
                     continue
-                if '"type":"result"' in line.replace(" ", ""):
-                    st["busy"] = False
-                    self._save_reply(sid, tr.saved_text())
+                obj = None
+                if line.startswith("{"):
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        obj = None
+                is_result = isinstance(obj, dict) and obj.get("type") == "result"
+                reply = tr.saved_text() if is_result else ""   # read before the result line resets it
+                events = translate(line)
+                with st["lock"]:
+                    if is_result and not st["stopped"]:
+                        if reply:
+                            self._save_reply(sid, reply)
+                        for ev in events:
+                            if ev.get("t") == "done" and ev.get("error"):
+                                self._save_answer(sid, ev.get("text") or TRY_AGAIN, "App")
+                        st["busy"] = False
+                    if events and not st["stopped"]:
+                        self._publish(st, events)
+                if is_result:
                     threading.Thread(target=self._maybe_handoff, args=(sid,), daemon=True).start()
-                if not emit(line) and not line.startswith("{"):
+                if obj is None and not events:
                     noise.append(line)
                     del noise[:-40]
         except Exception as exc:
             noise.append("reader error: " + repr(exc))
-        st["busy"] = False
-        if any("no conversation found" in n.lower() for n in noise):
+        no_conversation = any("no conversation found" in n.lower() for n in noise)
+        if no_conversation:
             try:  # the saved conversation is gone; the next message starts a fresh one
                 _side_file(sid, ".claude").write_text("new:" + str(uuid.uuid4()), encoding="utf-8")
             except OSError:
                 pass
         if not st["stopped"]:
             _log("chat process for {} ended (exit {}). Last output:\n{}".format(sid, proc.poll(), "\n".join(noise)))
-        emit(json.dumps({"type": "closed"}))
+        retry = None
+        with st["lock"]:
+            if st["busy"] and not st["stopped"] and no_conversation and st.get("line") and not st.get("retried"):
+                st["busy"] = False   # the message goes once more to a fresh conversation (below)
+                retry = st["line"]
+            elif st["busy"] and not st["stopped"]:  # it died in the middle of an answer: keep what came, say so
+                partial = tr.saved_text()
+                if partial:
+                    self._save_reply(sid, partial)
+                login = any(_needs_login(n) for n in noise)
+                msg = NOT_SIGNED_IN if login else "Aura stopped unexpectedly. Please send your message again."
+                self._save_answer(sid, msg, "App")
+                st["busy"] = False
+                self._publish(st, [{"t": "done", "error": True, "text": msg}])
+        if retry:
+            self._resend(sid, st, retry)
+
+    def _resend(self, sid, old, line):
+        """Send the same message again to a fresh process (once). The page keeps polling this chat and
+        simply sees the new process's events."""
+        _log("chat {}: saved conversation was gone, sending the message to a fresh one".format(sid))
+        st = self._claude_proc(sid)
+        err = NOT_SET_UP if st is None else None
+        if st is not None:
+            try:
+                with st["lock"]:
+                    del st["events"][:]
+                    del st["live"][:]
+                    st["busy"], st["stopped"], st["retried"], st["line"] = True, False, True, line
+                    st["last"] = time.time()
+                    st["started"] = old.get("started", time.time())
+                    st["phase"] = "think"
+                st["proc"].stdin.write(line)
+                st["proc"].stdin.flush()
+                return
+            except (OSError, ValueError) as exc:
+                _log("resend failed: " + repr(exc))
+                st["busy"] = False
+                err = CANT_START
+        target = st if st is not None else old
+        with target["lock"]:
+            self._save_answer(sid, err, "App")
+            self._publish(target, [{"t": "done", "error": True, "text": err}])
 
     @staticmethod
     def _save_reply(sid, text):
         if not text:
             return
         try:
-            chat_store.add_message(CHATS_DIR, sid, "assistant", "[Claude] " + text)
+            _store_add(sid, "assistant", "[Claude] " + text)
+        except KeyError:
+            pass  # the chat was deleted meanwhile
         except Exception as exc:
             _log("could not save reply: " + repr(exc))
 
     def _reap_idle_chats(self):
-        """Stop background processes of chats nobody used for 20 minutes (they resume on the next message)."""
+        """Stop background processes of chats nobody used for 20 minutes (they resume on the next message),
+        and end an answer that shows no sign of life for AURA_SILENT_SECONDS (so 'busy' never sticks)."""
         while True:
-            time.sleep(120)
+            time.sleep(30)
             try:
                 with self._chats_lock:
                     items = list(self._chats.items())
                 for sid, st in items:
                     idle = time.time() - st.get("last", time.time())
-                    if idle > IDLE_STOP_SECONDS and not st.get("busy") and st["proc"].poll() is None:
+                    alive = st["proc"].poll() is None
+                    if st.get("busy") and idle > AURA_SILENT_SECONDS:
+                        _log("chat {} silent for {} minutes while answering: stopping it".format(
+                            sid, AURA_SILENT_SECONDS // 60))
+                        msg = ("Aura got no answer for {} minutes, so it stopped. Please try again."
+                               .format(AURA_SILENT_SECONDS // 60))
+                        with st["lock"]:
+                            if st.get("busy"):
+                                partial = st["tr"].saved_text()
+                                if partial:
+                                    self._save_reply(sid, partial)
+                                self._save_answer(sid, msg, "App")
+                                st["busy"] = False
+                                self._publish(st, [{"t": "done", "error": True, "text": msg}])
+                            st["stopped"] = True
+                        self._stop_chat(sid)
+                    elif idle > IDLE_STOP_SECONDS and not st.get("busy") and alive:
                         _log("chat {} idle for 20 minutes: stopping its background process".format(sid))
-                        self.chat_stop(sid)
+                        self._stop_chat(sid)
             except Exception as exc:
                 _log("idle reaper: " + repr(exc))
 
@@ -1309,13 +1671,12 @@ class Api:
             before = transcript.stat().st_mtime
             if not (ROOT / "handoff.py").exists():
                 return
-            r = subprocess.run([CHILD_PY, str(ROOT / "handoff.py"), "--hook", "--print"],
-                               input=json.dumps({"transcript_path": str(transcript)}), text=True, capture_output=True,
-                               encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=900, env=_clean_env(),
-                               **_hidden())
-            summary = (r.stdout or "").strip()
+            out, err, _code, _reason = no_window.run_capture(
+                [CHILD_PY, str(ROOT / "handoff.py"), "--hook", "--print"], 900, cwd=str(ROOT), env=_clean_env(),
+                input_text=json.dumps({"transcript_path": str(transcript)}))
+            summary = (out or "").strip()
             if not summary:
-                _log("handoff gave no summary: " + (r.stderr or "")[-500:])
+                _log("handoff gave no summary: " + (err or "")[-500:])
                 return
             if transcript.stat().st_mtime != before:  # the chat moved on meanwhile; try again next time
                 return
@@ -1324,7 +1685,7 @@ class Api:
             if st and st.get("busy"):  # a new turn started meanwhile; do not cut it off
                 return
             _side_file(sid, ".summary").write_text(summary, encoding="utf-8")
-            self.chat_stop(sid)
+            self._stop_chat(sid)
             f.write_text("new:" + str(uuid.uuid4()), encoding="utf-8")
             _log("chat {} continues in a fresh conversation from the summary".format(sid))
         except Exception as exc:
@@ -1358,28 +1719,43 @@ class Api:
 
     def chat_send(self, sid, text, images=None) -> dict:
         try:
+            sid = str(sid)
+            if self._chat_working(sid):
+                return {"ok": False, "error": WORKING_ELSEWHERE}
             text = text or ""
             images = _valid_pictures(images)
             content, used_summary = self._compose_chat_message(sid, text, images)
             line = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
+            try:
+                _store_add(sid, "user", _user_line(text, images))   # first, so the reply always comes after it
+            except Exception as exc:
+                _log("could not save user message: " + repr(exc))
+            st = None
             for attempt in (1, 2):  # one automatic retry: if the process died, start a fresh one
                 st = self._claude_proc(sid)
                 if st is None:
+                    self._save_answer(sid, NOT_SET_UP, "App")
                     return {"ok": False, "error": NOT_SET_UP}
                 try:
-                    st["busy"], st["last"] = True, time.time()
+                    with st["lock"]:  # a new turn: nothing left over from the previous one
+                        del st["events"][:]
+                        del st["live"][:]
+                        st["busy"], st["stopped"] = True, False
+                        st["last"] = st["started"] = time.time()
+                        st["phase"] = "look" if images else "think"
+                        st["line"], st["retried"] = line, False
                     st["proc"].stdin.write(line)
                     st["proc"].stdin.flush()
                     break
                 except (OSError, ValueError) as exc:
                     _log("chat_send write failed (attempt {}): {}".format(attempt, repr(exc)))
-                    self.chat_stop(sid)
+                    st["busy"] = False
+                    time.sleep(0.5)  # let the reader collect what the process said before it died
+                    self._stop_chat(sid)
             else:
-                return {"ok": False, "error": CANT_START}
-            try:
-                chat_store.add_message(CHATS_DIR, sid, "user", _user_line(text, images))
-            except Exception as exc:
-                _log("could not save user message: " + repr(exc))
+                err = NOT_SIGNED_IN if st and any(_needs_login(n) for n in st.get("noise", [])) else CANT_START
+                self._save_answer(sid, err, "App")
+                return {"ok": False, "error": err}
             if used_summary:
                 _unlink(_side_file(sid, ".summary"))
             return {"ok": True}
@@ -1389,38 +1765,74 @@ class Api:
 
     def chat_poll(self, sid) -> list:
         try:
-            st = self._chats.get(sid)
+            with self._chats_lock:
+                st = self._chats.get(str(sid))
             if not st:
                 return []
             with st["lock"]:
                 out, st["events"] = st["events"], []
-            return out
+            return [json.dumps(e) for e in out]
         except Exception:
             return []
 
     def chat_stop(self, sid) -> bool:
+        """The Stop button: keep what was already written, note that it was stopped, end the process.
+        Also stops a Quick/Local/Big/Polish job of this chat."""
+        try:
+            sid = str(sid)
+            with self._chats_lock:
+                st = self._chats.get(sid)
+            if st:
+                with st["lock"]:
+                    if st.get("busy"):
+                        partial = st["tr"].saved_text()
+                        if partial:
+                            self._save_reply(sid, partial)
+                        self._save_answer(sid, "Stopped.", "Note")
+                        st["busy"] = False
+                        self._publish(st, [{"t": "done", "note": True, "text": "Stopped."}])
+                    st["stopped"] = True
+            job = self._stop_job(sid)
+            return self._stop_chat(sid) or job
+        except Exception as exc:
+            _log("chat_stop failed: " + repr(exc))
+            return False
+
+    def _stop_chat(self, sid) -> bool:
+        """End the chat's background process (nothing is saved). Its state stays until the next message, so
+        the page can still collect the last events."""
         try:
             with self._chats_lock:
-                st = self._chats.pop(sid, None)
+                st = self._chats.get(str(sid))
             if not st:
                 return False
             st["stopped"] = True
             _kill_tree(st["proc"])
             return True
         except Exception as exc:
-            _log("chat_stop failed: " + repr(exc))
+            _log("stopping chat process failed: " + repr(exc))
             return False
 
     def chat_save(self, sid, text) -> None:
-        """Keep the part of an answer that was shown before the user pressed Stop."""
-        self._save_reply(sid, str(text or ""))
+        """Older pages saved the part shown before Stop themselves; chat_stop does that now."""
+        try:
+            with self._chats_lock:
+                st = self._chats.get(str(sid))
+            if st is None:
+                self._save_reply(str(sid), str(text or ""))
+        except Exception as exc:
+            _log("chat_save failed: " + repr(exc))
 
     def _shutdown(self):
         """The window closed: stop every helper this app started."""
         with self._chats_lock:
             sids = list(self._chats)
         for sid in sids:
-            self.chat_stop(sid)
+            self._stop_chat(sid)
+        with self._jobs_lock:
+            jids = list(self._jobs)
+        for sid in jids:
+            self._stop_job(sid, quiet=True)
         self.term_restart()
         with self._srv_lock:  # website previews: free their ports
             servers, self._servers = list(self._servers.values()), {}
@@ -1694,11 +2106,10 @@ def _keep_links_inside(api_obj) -> None:
 def _read_ollama_url() -> None:
     """A PC that uses another PC's graphics card keeps the address in ollama_url.txt."""
     try:
-        f = ROOT / "ollama_url.txt"
-        if f.exists():
-            url = f.read_text(encoding="utf-8-sig").strip()
-            if url.lower().startswith(("http://", "https://")):
-                os.environ["OLLAMA_URL"] = url
+        url = ollama_addr.read_address(ROOT)   # also fixes a typed "192.168.1.6" (no http://, no port)
+        os.environ["OLLAMA_URL"] = url
+        if (ROOT / "ollama_url.txt").exists():
+            _log("local helper address: " + url)
     except Exception as exc:
         _log("ollama_url.txt failed: " + repr(exc))
 

@@ -161,6 +161,14 @@ body.sb-hidden #sidebar { display: none; }
 .session:hover .del, .session:focus-within .del, .session.active .del { opacity: 1; }
 .session .del:hover, .session .del:focus-visible { color: var(--danger); background: var(--danger-soft); opacity: 1; }
 .session .del:focus-visible { outline-offset: -2px; }
+/* a chat that is working in the background: small pulsing dot */
+.session .run-dot { display: none; flex: none; width: 7px; height: 7px; margin-left: auto; border-radius: 50%;
+  background: var(--g-cyan); box-shadow: 0 0 8px var(--g-cyan); animation: runPulse 1.4s ease-in-out infinite; }
+.session.working .run-dot { display: block; }
+.session.working span { flex: 1; min-width: 0; }
+@keyframes runPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+body.calm .session .run-dot { animation: none; }
+@media (prefers-reduced-motion: reduce) { .session .run-dot { animation: none; } }
 
 /* the chat you are in: glitchy highlight */
 .session.active { color: #fff;

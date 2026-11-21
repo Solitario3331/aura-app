@@ -27,25 +27,39 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT / "src"))
+
+
 def _ollama_url() -> str:
     try:
-        f = Path(__file__).parent / "ollama_url.txt"
-        if f.exists():
-            u = f.read_text(encoding="utf-8-sig").strip()
-            if u.lower().startswith(("http://", "https://")):
-                return u
-    except OSError:
-        pass
-    return os.environ.get("OLLAMA_URL", "http://localhost:11434")
+        from ollama_addr import read_address
+        return read_address(ROOT)
+    except Exception:
+        return os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
 
-ROOT = Path(__file__).parent
+def _env_num(name, default):
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return float(default)
+
+
 HOME = Path.home()
 LOG = ROOT / "logs" / "agent.log"
 IN_AURA = bool(os.environ.get("AURA_APP"))
+PROGRESS = bool(os.environ.get("AURA_PROGRESS"))   # the Aura app shows live step lines (lines starting with @@aura)
+PROGRESS_PREFIX = "@@aura "
 OLLAMA_URL = _ollama_url()
-NUM_CTX = int(os.environ.get("QWEN_NUM_CTX", "65536"))
+NUM_CTX = int(_env_num("QWEN_NUM_CTX", 65536))
 MAX_STEPS = 30
+STARTED = time.time()
+DEADLINE = _env_num("AGENT_DEADLINE", 0)           # seconds for the whole task (0 = no limit); the app sets it
+CONNECT_TIMEOUT = 10                               # a PC that is off or blocked must not keep us waiting
+READ_GAP = _env_num("AGENT_READ_GAP", 240)         # longest silence from the helper (it streams, so silence = stuck)
+THINK_MAX_SECONDS = _env_num("AGENT_THINK_MAX", 45)  # "thinking" longer than this is cut; the step reruns without it
+THINK_STEPS = 2                                    # think only on the first steps (planning), never on every tool turn
 
 
 def _model_name() -> str:
@@ -59,12 +73,18 @@ def _model_name() -> str:
 
 MODEL = _model_name()
 
-sys.path.insert(0, str(ROOT / "src"))
 try:
-    from no_window import hidden as _hidden
-except Exception:  # helper missing: plain behavior
-    def _hidden():
-        return {}
+    from no_window import run_capture
+except Exception:  # helper missing: plain behavior (may wait for programs the command opened)
+    def run_capture(cmd, timeout, cwd=None, **_):
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout, cwd=cwd,
+                           stdin=subprocess.DEVNULL)
+        return r.stdout, r.stderr, r.returncode, None
+try:
+    from step_text import agent_step
+except Exception:
+    def agent_step(name, args):
+        return {"kind": "work", "text": "Working on it"}
 try:
     from browse_policy import wants_browser
 except Exception:  # if the helper is missing, behave as before (browsing allowed)
@@ -215,9 +235,14 @@ def _run_powershell(cmd: str) -> str:
         return "REFUSED: the user did not ask to browse the web. Answer in the chat instead."
     if BLOCKED.search(cmd):
         return "REFUSED: this command can delete/change things and is not allowed."
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True,
-                       text=True, errors="replace", timeout=1800, cwd=str(HOME), **_hidden())
-    return ((r.stdout or "") + (r.stderr or ""))[-3000:] or f"(done, exit code {r.returncode})"
+    limit = 1800 if not DEADLINE else max(20, min(1800, DEADLINE - (time.time() - STARTED) - 30))
+    # stdin is empty (a command waiting for typed input gets nothing instead of hanging), and programs the
+    # command opens (notepad, a browser...) no longer keep us waiting until they are closed.
+    out, err, code, reason = run_capture(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+                                         limit, cwd=str(HOME))
+    if reason == "timeout":
+        return "ERROR: the command took too long and was stopped. " + ((out or "") + (err or ""))[-1500:]
+    return ((out or "") + (err or ""))[-3000:] or f"(done, exit code {code})"
 
 
 def _write_file(path: str, content: str) -> str:
@@ -240,18 +265,31 @@ def _delete_to_recycle_bin(path: str) -> str:
     quoted = str(p).replace("'", "''")
     ps = ("Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::"
           f"{kind}('{quoted}','OnlyErrorDialogs','SendToRecycleBin')")
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
-                       text=True, errors="replace", timeout=120, **_hidden())
-    return f"moved to Recycle Bin: {p}" if r.returncode == 0 else f"ERROR: {(r.stderr or '')[-500:]}"
+    _out, err, code, reason = run_capture(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], 120)
+    if reason == "timeout":
+        return "ERROR: moving it to the Recycle Bin took too long."
+    return f"moved to Recycle Bin: {p}" if code == 0 else f"ERROR: {(err or '')[-500:]}"
 
 
 def _read_file(path: str, limit: int = 12000) -> str:
     """Text of a file. Plain text, code, PDF (pypdf) and Word .docx are understood."""
     p = Path(path)
     ext = p.suffix.lower()
+    if not p.exists():
+        return f"ERROR: {p} does not exist."
+    if p.is_dir():
+        return f"ERROR: {p} is a folder, not a file. List it with run_powershell (Get-ChildItem) instead."
     if ext == ".pdf":
-        from pypdf import PdfReader
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            return "ERROR: PDF reading is not installed on this PC (run install.bat again)."
         reader = PdfReader(str(p))
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception:
+                return "ERROR: this PDF is locked with a password."
         out, size = [], 0
         for i, page in enumerate(reader.pages, 1):
             text = (page.extract_text() or "").strip()
@@ -260,7 +298,12 @@ def _read_file(path: str, limit: int = 12000) -> str:
             if size >= limit:
                 out.append(f"(stopped after page {i} of {len(reader.pages)})")
                 break
+        if not size:
+            return f"(This PDF has {len(reader.pages)} page(s) but no readable text; it is probably scanned pictures.)"
         return chr(10).join(out)[:limit]
+    if ext in (".exe", ".dll", ".zip", ".7z", ".rar", ".msi", ".iso", ".mp3", ".mp4", ".mov", ".avi", ".wav",
+               ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"):
+        return f"ERROR: {p.name} is not a text file, so it cannot be read as text."
     if ext == ".docx":
         import re
         import zipfile
@@ -305,23 +348,82 @@ def _parse_args(raw) -> dict:
         return {}
 
 
+def emit(ev: dict) -> None:
+    """A live progress line for the Aura app (only when it asked for them)."""
+    if PROGRESS:
+        try:
+            print(PROGRESS_PREFIX + json.dumps(ev), flush=True)
+        except Exception:
+            pass
+
+
+class ThinkTooLong(Exception):
+    """The helper 'thought' longer than THINK_MAX_SECONDS: the step is asked again without thinking."""
+
+
 def _chat(messages, tools, think: bool, vary: bool) -> dict:
-    """One request to Ollama. Raises a clear error if Ollama cannot be reached."""
+    """One request to Ollama, streamed: a silent or unreachable helper is noticed within seconds/minutes
+    instead of after 15 minutes. Exits with a clear message if Ollama cannot be reached."""
     options = {"temperature": 0.9 if vary else (0.6 if think else 0.1), "num_ctx": NUM_CTX}
     if vary:  # "another answer": a different seed so the reply really changes
         options["seed"] = random.randint(1, 2**31 - 1)
+    body = {"model": MODEL, "stream": True, "think": think, "messages": messages, "options": options}
+    if tools:
+        body["tools"] = tools
     try:
-        r = requests.post(f"{OLLAMA_URL}/api/chat", timeout=900, json={
-            "model": MODEL, "stream": False, "think": think, "tools": tools,
-            "messages": messages, "options": options})
+        r = requests.post(f"{OLLAMA_URL}/api/chat", json=body, stream=True, timeout=(CONNECT_TIMEOUT, READ_GAP))
+    except requests.exceptions.ConnectTimeout:
+        sys.exit(f"Could not connect to Ollama at {OLLAMA_URL} (no answer). Is that PC on?")
     except requests.exceptions.ConnectionError:
         sys.exit(f"Could not connect to Ollama at {OLLAMA_URL}. Is it running?")
     except requests.exceptions.Timeout:
-        sys.exit("Ollama took too long to answer (15 min). Try again later.")
+        sys.exit("Ollama took too long to answer. Try again later.")
     if r.status_code >= 400:
-        log(f"OLLAMA ERROR {r.status_code}: {r.text[:500]}")
-        sys.exit(f"Ollama returned an error ({r.status_code}): {r.text[:300]}")
-    return r.json().get("message") or {}
+        text = r.text[:500]
+        r.close()
+        if think and r.status_code == 400 and "think" in text.lower():  # this model cannot think: just ask again
+            log("THINK: not supported by the model, asking without it")
+            return _chat(messages, tools, False, vary)
+        log(f"OLLAMA ERROR {r.status_code}: {text}")
+        sys.exit(f"Ollama returned an error ({r.status_code}): {text[:300]}")
+    content, calls, think_started = [], [], None
+    try:
+        with r:
+            for raw in r.iter_lines():
+                if not raw:
+                    continue
+                try:
+                    chunk = json.loads(raw)
+                except ValueError:
+                    continue
+                if chunk.get("error"):
+                    log(f"OLLAMA ERROR (stream): {str(chunk['error'])[:500]}")
+                    sys.exit(f"Ollama returned an error: {str(chunk['error'])[:300]}")
+                m = chunk.get("message") or {}
+                if m.get("thinking"):
+                    if think_started is None:
+                        think_started = time.time()
+                    elif time.time() - think_started > THINK_MAX_SECONDS:
+                        raise ThinkTooLong()
+                if m.get("content"):
+                    content.append(m["content"])
+                if m.get("tool_calls"):
+                    calls.extend(m["tool_calls"])
+                if chunk.get("done"):
+                    break
+    except requests.exceptions.RequestException as exc:
+        log("OLLAMA STREAM ERROR: " + repr(exc))
+        if "timed out" in str(exc).lower() or isinstance(exc, requests.exceptions.Timeout):
+            sys.exit(f"Ollama took too long to answer (no reply for {int(READ_GAP // 60)} min). Try again later.")
+        sys.exit(f"Lost the connection to Ollama at {OLLAMA_URL}. Is that PC still on?")
+    msg = {"role": "assistant", "content": "".join(content)}
+    if calls:
+        msg["tool_calls"] = calls
+    return msg
+
+
+def _time_left() -> float:
+    return float("inf") if not DEADLINE else DEADLINE - (time.time() - STARTED)
 
 
 def main(task: str, images: list[str] | None = None) -> None:
@@ -340,9 +442,22 @@ def main(task: str, images: list[str] | None = None) -> None:
     log("THINK: " + ("on" if think else "off"))
     log("BROWSER: " + ("allowed" if BROWSE_OK else "not asked for"))
 
-    last_sig, repeats = "", 0
+    last_sig, repeats, why_stop = "", 0, "steps"
     for step in range(1, MAX_STEPS + 1):
-        msg = _chat(messages, tools, think, vary)
+        if _time_left() < 45:  # leave time for a short summary before the app's watchdog stops us
+            why_stop = "time"
+            log("DEADLINE: stopping after step " + str(step - 1))
+            break
+        use_think = think and step <= THINK_STEPS
+        if step > 1:
+            emit({"t": "phase", "kind": "think"})
+        try:
+            msg = _chat(messages, tools, use_think, vary)
+        except ThinkTooLong:
+            log(f"THINK: longer than {int(THINK_MAX_SECONDS)} s, asking again without thinking")
+            think = False
+            emit({"t": "phase", "kind": "write"})
+            msg = _chat(messages, tools, False, vary)
         messages.append(msg)
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -354,8 +469,10 @@ def main(task: str, images: list[str] | None = None) -> None:
             fn = call.get("function") or {}
             name = fn.get("name", "")
             args = _parse_args(fn.get("arguments"))
-            if not IN_AURA:  # inside the Aura app the steps stay in logs/agent.log only
+            if not IN_AURA:  # inside the Aura app the raw steps stay in logs/agent.log only
                 print(f"[{step}] {name}: {json.dumps(args)[:200]}", flush=True)
+            ev = agent_step(name, args)
+            emit({"t": "step", "kind": ev.get("kind", "work"), "text": ev.get("text", "")})
             out = run_tool(name, args)
             log(f"{name} {json.dumps(args)[:300]} -> {out[:300]}")
             sig = name + json.dumps(args, sort_keys=True)
@@ -364,13 +481,20 @@ def main(task: str, images: list[str] | None = None) -> None:
             if repeats >= 2:  # the same call again and again: push it to change its approach
                 out += " (You already tried this exact step. Try something different or explain what blocks you.)"
             messages.append({"role": "tool", "tool_name": name, "content": out})
-    # Out of steps: instead of failing, ask for a plain summary of what got done and what is left.
-    messages.append({"role": "user", "content": "You are out of steps. Reply in 2-3 plain sentences: what you finished and what is left."})
-    try:
-        final = (_chat(messages, [], False, False).get("content") or "").strip()
-    except SystemExit:
-        final = ""
-    print(final or "I ran out of steps before finishing. Try asking for a smaller piece of the task.")
+    # Out of steps (or time): instead of failing, ask for a plain summary of what got done and what is left.
+    log("OUT OF " + why_stop.upper())
+    final = ""
+    if _time_left() > 15:
+        emit({"t": "phase", "kind": "write"})
+        messages.append({"role": "user", "content": "You are out of " + why_stop + ". Reply in 2-3 plain sentences: "
+                         "what you finished and what is left."})
+        try:
+            final = (_chat(messages, [], False, False).get("content") or "").strip()
+        except (SystemExit, ThinkTooLong):
+            final = ""
+    print(final or ("I ran out of time before finishing. Try asking for a smaller piece of the task."
+                    if why_stop == "time" else
+                    "I ran out of steps before finishing. Try asking for a smaller piece of the task."))
 
 
 if __name__ == "__main__":

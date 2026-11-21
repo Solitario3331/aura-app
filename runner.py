@@ -16,6 +16,12 @@ import requests
 
 def _ollama_url() -> str:
     try:
+        sys.path.insert(0, str(Path(__file__).parent / "src"))
+        from ollama_addr import read_address
+        return read_address(Path(__file__).parent)
+    except Exception:
+        pass
+    try:
         f = Path(__file__).parent / "ollama_url.txt"
         if f.exists():
             u = f.read_text(encoding="utf-8-sig").strip()
@@ -77,7 +83,7 @@ def ask_qwen(prompt: str, model: str = "", system: str = "") -> str:
                 {"role": "user", "content": prompt},
             ],
         },
-        timeout=900,
+        timeout=(10, 900),
     )
     r.raise_for_status()
     return r.json()["message"]["content"]
@@ -126,12 +132,18 @@ def run_checks(task_dir: Path, name: str) -> tuple[bool, str]:
     )
     if lint.returncode != 0 and "No module named ruff" not in lint.stderr:
         out += "LINT ERRORS:\n" + lint.stdout + lint.stderr
-    test = subprocess.run(
-        [PY, "-m", "pytest", "-x", "-q", str(task_dir / "test_task.py")],
-        capture_output=True, text=True, env=env, **_hidden(),
-    )
-    out += "\nTEST OUTPUT:\n" + test.stdout[-3000:] + test.stderr[-1000:]
-    return (lint.returncode == 0 or "No module named ruff" in lint.stderr) and test.returncode == 0, out
+    cmd = [PY, "-m", "pytest", "-x", "-q", str(task_dir / "test_task.py")]
+    try:  # a test run can hang (endless loop in the new code): stop it after 5 minutes
+        from no_window import run_capture
+        t_out, t_err, t_code, reason = run_capture(cmd, 300, env=env)
+        if reason == "timeout":
+            t_err += "\nThe tests took longer than 5 minutes and were stopped (endless loop?)."
+            t_code = 1
+    except ImportError:
+        test = subprocess.run(cmd, capture_output=True, text=True, env=env, **_hidden())
+        t_out, t_err, t_code = test.stdout, test.stderr, test.returncode
+    out += "\nTEST OUTPUT:\n" + t_out[-3000:] + t_err[-1000:]
+    return (lint.returncode == 0 or "No module named ruff" in lint.stderr) and t_code == 0, out
 
 
 def log(entry: dict) -> None:

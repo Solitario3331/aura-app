@@ -58,6 +58,111 @@ def gui_python() -> str:
     return exe
 
 
+def kill_tree(proc) -> None:
+    """Stop a helper and everything it started (Windows keeps grandchildren alive otherwise)."""
+    try:
+        if proc.stdin:
+            proc.stdin.close()
+    except Exception:
+        pass
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10,
+                           stdin=subprocess.DEVNULL, **hidden())
+        except Exception:
+            pass
+    try:
+        if proc.poll() is None:
+            proc.kill()
+    except Exception:
+        pass
+
+
+def run_capture(cmd, timeout, cwd=None, env=None, input_text=None, on_line=None, should_stop=None,
+                on_start=None, poll=0.2):
+    """Run a console helper hidden and NEVER hang.
+
+    subprocess.run(timeout=...) can block forever on Windows: after the timeout it kills only the child and
+    then waits for the output pipes to close, but a grandchild (PowerShell, a program it opened...) still holds
+    them. Here the output is read by background threads, the whole process tree is killed on timeout/stop, and
+    the reader threads are only waited for a few seconds.
+
+    on_line(text) is called for every stdout line as it arrives; should_stop() is checked a few times a second;
+    on_start(proc) gets the process right after it started.
+    Returns (stdout, stderr, returncode, reason) where reason is None, "timeout" or "stopped".
+    """
+    import threading
+    import time
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=env, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", **hidden())
+    if on_start is not None:
+        try:
+            on_start(proc)
+        except Exception:
+            pass
+    out, err = [], []
+
+    def read_out():
+        try:
+            for line in proc.stdout:
+                out.append(line)
+                if on_line is not None:
+                    try:
+                        on_line(line.rstrip("\r\n"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def read_err():
+        try:
+            for line in proc.stderr:
+                err.append(line)
+                if len(err) > 2000:
+                    del err[:1000]
+        except Exception:
+            pass
+
+    def write_in():
+        try:
+            proc.stdin.write(input_text)
+            proc.stdin.close()
+        except Exception:
+            pass
+
+    threads = [threading.Thread(target=read_out, daemon=True), threading.Thread(target=read_err, daemon=True)]
+    if input_text is not None:
+        threads.append(threading.Thread(target=write_in, daemon=True))
+    for t in threads:
+        t.start()
+    deadline = time.time() + max(1.0, float(timeout))
+    reason = None
+    while proc.poll() is None:
+        if should_stop is not None:
+            try:
+                if should_stop():
+                    reason = "stopped"
+                    break
+            except Exception:
+                pass
+        if time.time() > deadline:
+            reason = "timeout"
+            break
+        time.sleep(poll)
+    if reason:
+        kill_tree(proc)
+    for t in threads[:2]:
+        t.join(timeout=3)
+    try:
+        code = proc.wait(timeout=5)
+    except Exception:
+        code = proc.poll()
+    return "".join(out), "".join(err), code, reason
+
+
 def child_python() -> str:
     """The console python.exe next to the running interpreter (falls back to sys.executable)."""
     exe = sys.executable or "python"

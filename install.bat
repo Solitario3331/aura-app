@@ -54,9 +54,24 @@ if errorlevel 1 (echo Could not make the icon.) else (echo Aura icon is on your 
 echo.
 echo STEP 4 of 5: The free helper (Qwen)
 if "%WHERE%"=="2" goto local
-set IP=192.168.1.6
-set /p IP=Address of Amar's PC - press Enter for 192.168.1.6:
-if "%IP%"=="" set IP=192.168.1.6
+set IP=
+if exist ollama_url.txt set /p IP=<ollama_url.txt
+:askip
+if defined IP (
+  set /p IP=Address of Amar's PC [%IP%] - press Enter to keep it:
+) else (
+  set /p IP=Address of Amar's PC ^(for example 192.168.1.20^):
+)
+if not defined IP (
+  echo Please type the address. Amar can see it on his PC with: ipconfig
+  goto askip
+)
+rem accept "192.168.1.20", "192.168.1.20:11434" or "http://192.168.1.20:11434/"
+set IP=%IP:http://=%
+set IP=%IP:https://=%
+set IP=%IP:/=%
+set IP=%IP::11434=%
+set IP=%IP: =%
 > ollama_url.txt echo http://%IP%:11434
 curl.exe -s -m 8 http://%IP%:11434/api/tags >nul 2>&1
 if errorlevel 1 (

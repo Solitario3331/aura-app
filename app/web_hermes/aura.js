@@ -308,13 +308,17 @@
     plan:   { seq: false, words: ["Planning", "Mapping it out", "Splitting the job"] },
     write:  { seq: false, words: ["Writing", "Putting it together", "Shaping the answer", "Wrapping up"] },
     big:    { seq: true,  words: ["Planning", "Splitting the job", "Building the pieces", "Testing the pieces", "Connecting everything", "Checking the result"] },
-    polish: { seq: true,  words: ["Reviewing", "Looking for rough edges", "Polishing", "Refining the details", "Final checks"] }
+    polish: { seq: true,  words: ["Reviewing", "Looking for rough edges", "Polishing", "Refining the details", "Final checks"] },
+    wait:   { seq: false, words: ["Waiting for the other chat to finish", "Waiting in line"] },
+    stop:   { seq: true,  words: ["Stopping"] }
   };
+  var CHIP_PREFIX = "";
   var CHIP = { read: "Read files", search: "Searched", edit: "Edited files", run: "Ran a command", work: "Completed a task",
                build: "Built and tested", web: "Looked something up", plan: "Planned the steps" };
 
-  /* Creates the status line at the bottom of the chat. Returns { el, phase(p), stop() }. */
-  function startStatus(phase) {
+  /* Creates the status line at the bottom of the chat. Returns { el, phase(p), stop() }.
+     sinceMs: how long the work has already been running (when coming back to a chat that is still working). */
+  function startStatus(phase, sinceMs) {
     messagesEl.querySelectorAll(".working").forEach(function (o) { o.remove(); }); // never show two
     var w = document.createElement("div");
     w.className = "working";
@@ -328,7 +332,7 @@
     messagesEl.appendChild(w);
     scrollDown();
 
-    var cur = STATUS[phase] ? phase : "think", idx = -1, last = "", t0 = Date.now(), gi = 4, ticks = 0, nextWord = 0;
+    var cur = STATUS[phase] ? phase : "think", idx = -1, last = "", t0 = Date.now() - (sinceMs || 0), gi = 4, ticks = 0, nextWord = 0;
     function pick() {
       var list = STATUS[cur] || STATUS.think, word;
       if (list.seq) { idx = Math.min(idx + 1, list.words.length - 1); word = list.words[idx]; }
@@ -356,41 +360,76 @@
     };
   }
 
-  function setBusy(on, canStop) {
-    busy = on;
-    sendBtn.disabled = on;
-    document.body.classList.toggle("can-stop", !!(on && canStop));
-    document.body.classList.toggle("busy", !!on);
-    // do not pull focus out of an open dialog or the terminal when the answer arrives
-    if (!on) { stopFn = null; if (!document.querySelector(".modal-back") && !termVisible()) input.focus(); }
+  /* ---------- chats work on their own: the page only watches the open one ---------- */
+  var running = {}, view = null; // running: chat id -> working; view: the live work shown for the open chat
+  function anyRunning() { return Object.keys(running).length > 0; }
+  function paintBusy() {
+    busy = !!(currentId && running[currentId]);
+    var mine = !!(busy && view && view.sid === currentId);
+    sendBtn.disabled = busy;
+    stopFn = mine ? view.stop : null;
+    document.body.classList.toggle("can-stop", mine);
+    document.body.classList.toggle("busy", busy);
   }
+  function paintRunDots() {
+    Array.prototype.forEach.call($("sessionList").querySelectorAll(".session"), function (r) {
+      var on = !!running[r.dataset.id];
+      r.classList.toggle("working", on);
+      r.setAttribute("aria-label", (r.title || "Chat") + (on ? " (Aura is working on it)" : ""));
+    });
+  }
+  function setRunning(sid, on) {
+    if (sid && !!running[sid] !== !!on) {
+      if (on) running[sid] = true; else delete running[sid];
+      paintRunDots();
+    }
+    paintBusy();
+  }
+  /* Only for things that must wait for every chat (update, delete all). */
   function guardBusy() {
-    if (!busy) return false;
-    toast(stopFn ? "Aura is still answering. Press Stop first." : "Please wait until Aura is finished.");
+    if (!anyRunning()) return false;
+    toast("Aura is still working on a chat. Wait for it to finish, or press Stop.");
     return true;
+  }
+  /* Which chats work right now on the Python side: dots in the chat list, and a safety net if the open
+     chat's answer finished without the page noticing (it then reloads the chat, which shows the answer). */
+  function pollBusy() {
+    api.busy_chats().then(function (list) {
+      var now = {};
+      (list || []).forEach(function (id) { now[id] = true; });
+      Object.keys(running).forEach(function (id) { if (!now[id] && !(view && view.sid === id)) delete running[id]; });
+      Object.keys(now).forEach(function (id) { running[id] = true; });
+      if (view && view.live && !now[view.sid]) { if (++view.lost >= 3) view.resync(); }
+      else if (view) view.lost = 0;
+      paintRunDots(); paintBusy();
+    }).catch(noop).then(function () { setTimeout(pollBusy, 2000); });
   }
 
   /* ---------- chats list (latest 7, then "Show all") ---------- */
   var RECENT = 7, showAllChats = false;
   function sessionRow(s) {
     var row = document.createElement("div");
-    var active = s.id === currentId, title = s.title || "New chat";
-    row.className = "session" + (active ? " active" : "");
+    var active = s.id === currentId, title = s.title || "New chat", working = !!running[s.id];
+    row.className = "session" + (active ? " active" : "") + (working ? " working" : "");
     row.tabIndex = 0;
     row.dataset.id = s.id;
     row.setAttribute("role", "button");
     if (active) row.setAttribute("aria-current", "true");
     row.title = title;
+    row.setAttribute("aria-label", title + (working ? " (Aura is working on it)" : ""));
     var span = document.createElement("span");
     span.textContent = title;
+    var dot = document.createElement("i");
+    dot.className = "run-dot"; dot.setAttribute("aria-hidden", "true"); dot.title = "Aura is working on this chat";
     var del = document.createElement("button");
     del.type = "button"; del.className = "del"; del.textContent = "×";
     del.title = "Delete chat";
     del.setAttribute("aria-label", "Delete chat " + title);
     del.addEventListener("click", function (e) { e.stopPropagation(); deleteChat(s); });
     row.appendChild(span);
+    row.appendChild(dot);
     row.appendChild(del);
-    row.addEventListener("click", function () { if (s.id !== currentId && !guardBusy()) openSession(s.id); });
+    row.addEventListener("click", function () { if (s.id !== currentId) openSession(s.id); });
     row.addEventListener("keydown", function (e) {
       if (e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); row.click(); }
     });
@@ -441,13 +480,17 @@
     return more;
   }
   function deleteChat(s) {
-    if (busy && currentId === s.id) { guardBusy(); return; }
-    askConfirm({ title: "Delete this chat?", text: "“" + (s.title || "New chat") + "” and all its messages will be removed. This can’t be undone.",
-                 ok: "Delete", danger: true }).then(function (yes) {
+    var text = "“" + (s.title || "New chat") + "” and all its messages will be removed. This can’t be undone.";
+    if (running[s.id]) text = "Aura is still working on this chat; that work stops. " + text;
+    askConfirm({ title: "Delete this chat?", text: text, ok: "Delete", danger: true }).then(function (yes) {
       if (!yes) return;
+      if (view && view.sid === s.id) view.detach();
       return api.delete_session(s.id).then(function (ok) {
         if (!ok) toast("Could not delete this chat.");
-        else if (currentId === s.id) { currentId = null; messagesEl.textContent = ""; }
+        else {
+          setRunning(s.id, false);
+          if (currentId === s.id) { currentId = null; messagesEl.textContent = ""; }
+        }
         return refreshSessions();
       }).then(function () {
         if (!currentId) return sessions.length ? openSession(sessions[0].id) : newChat();
@@ -460,18 +503,27 @@
       renderSessions();
     }).catch(function () { toast("Could not load your chats."); });
   }
+  /* A saved message. The internal [Who] tag is dropped; [App] = an error Aura showed, [Note] = "Stopped." */
+  function showStored(m) {
+    var raw = m.text || "";
+    if (m.role === "user") { addBubble("user", raw); return; }
+    var tag = (/^\[([A-Za-z]+)\]\s?/.exec(raw) || [])[1];
+    addBubble("assistant", raw.replace(/^\[[A-Za-z]+\]\s?/, ""), tag === "App" ? "error" : tag === "Note" ? "note" : null);
+  }
+  /* Open a chat. If it is still working (maybe started before you switched away), its live state comes back:
+     text so far, step lines and the running timer. The work of the chat you leave keeps going. */
   function openSession(id) {
+    if (view) view.detach();
     currentId = id;
     messagesEl.textContent = "";
     messagesEl.classList.add("loading"); // no front-page flash while the chat loads
-    renderSessions();
-    return api.load_session(id).then(function (data) {
+    stick = true;
+    renderSessions(); paintBusy();
+    return api.open_chat(id).then(function (data) {
       if (currentId !== id) return;
-      if (data && data.error) { addBubble("assistant", "This chat could not be opened.", "error"); return; }
-      ((data && data.messages) || []).forEach(function (m) {
-        var text = (m.text || "").replace(/^\[[A-Za-z]+\]\s?/, ""); // drop the internal [Who] tag
-        addBubble(m.role === "user" ? "user" : "assistant", text);
-      });
+      if (!data || data.error) { addBubble("assistant", "This chat could not be opened.", "error"); return; }
+      (data.messages || []).forEach(showStored);
+      if (data.run) attachRun(id, data.run).start(); else setRunning(id, false);
       scrollDown(true);
     }).catch(function () {
       if (currentId === id) addBubble("assistant", "This chat could not be opened.", "error");
@@ -480,10 +532,12 @@
   function newChat() {
     return api.new_session().then(function (id) {
       if (!id) throw new Error("no id");
+      if (view) view.detach();
       currentId = id;
       messagesEl.textContent = "";
       messagesEl.classList.remove("loading");
       stick = true;
+      paintBusy();
       return refreshSessions();
     }).catch(function () { toast("Could not start a new chat. Please try again."); });
   }
@@ -556,97 +610,97 @@
     return function () { clearInterval(timer); checkSite(since); };
   }
 
-  /* Aura mode: streaming answer from the chat's background process. */
-  function sendAura(text, images) {
-    var sid = currentId, st = startStatus(images.length ? "look" : "think");
-    var stopWatch = watchSites(Date.now() / 1000 - 1);
-    var finished = false, parts = [], cur = null, pending = null, raf = 0, timer = 0, delay = 80;
+  /* The live work of the open chat: status line with timer, streamed text (Aura mode), step lines
+     ("Reading notes.pdf", "Saving index.html"...), then the answer. run = { kind: "aura"|"job", phase,
+     elapsed (s), items (what already happened, when coming back to the chat) }. Returns a view:
+     start() begins polling, stop() asks Python to stop, detach() only stops watching (the work goes on),
+     fail(msg) shows a start error, resync() reloads the chat from what Python saved. */
+  function attachRun(sid, run) {
+    if (view) view.detach();
+    var kind = run.kind === "aura" ? "aura" : "job", finished = false, timer = 0, delay = 80;
+    var cur = null, pending = null, raf = 0, stopAsked = 0, elapsed = Math.max(0, +run.elapsed || 0);
+    var st = startStatus(run.phase || "think", elapsed * 1000);
+    var stopWatch = watchSites(Date.now() / 1000 - 1 - elapsed);
+    var v = { sid: sid, kind: kind, live: false, lost: 0 };
     function flush() {
       raf = 0;
       if (pending) { renderRich(pending.el, pending.text); scrollDown(); }
       pending = null;
     }
     function keepStatusLast() { messagesEl.appendChild(st.el); scrollDown(); }
-    function done() {
-      if (finished) return;
-      finished = true;
+    function newBubble() { cur = addBubble("assistant", ""); keepStatusLast(); }
+    function chip(it) { addChip(CHIP_PREFIX + (it.text || CHIP[it.kind] || "Completed a task")); cur = null; }
+    function close(keepRunning) {
+      if (finished) return false;
+      finished = true; v.live = false;
       clearTimeout(timer);
       if (raf) { cancelAnimationFrame(raf); flush(); }
-      st.stop();
-      stopWatch();
-      setBusy(false);
-      refreshSessions();
+      st.stop(); stopWatch();
+      if (view === v) view = null;
+      if (keepRunning) paintBusy(); else setRunning(sid, false);
+      return true;
     }
-    function newBubble() { cur = addBubble("assistant", ""); parts.push(""); keepStatusLast(); }
+    function finish(e) {
+      if (finished) return;
+      if (raf) { cancelAnimationFrame(raf); flush(); } // draw the last text first
+      if (cur && !cur.textContent.trim() && cur.parentNode) cur.parentNode.remove(); // never leave an empty bubble
+      close(false);
+      if (e.t === "closed") addBubble("assistant", "Aura stopped unexpectedly. Please send your message again.", "error");
+      else if (e.note) addBubble("assistant", e.text || "Stopped.", "note");
+      else if (e.error) addBubble("assistant", e.text || "Something went wrong. Please try again.", "error");
+      else if (kind === "job") addBubble("assistant", e.text || "No answer.");
+      refreshSessions();
+      if (!document.querySelector(".modal-back") && !termVisible()) focusInput();
+    }
     function handle(e) {
-      if (e.t === "new_bubble") {
-        newBubble();
-      } else if (e.t === "text") {
+      if (e.t === "new_bubble") newBubble();
+      else if (e.t === "text") {
         st.phase("write");
         if (!cur) newBubble();
-        parts[parts.length - 1] = e.text || "";
         pending = { el: cur, text: e.text || "" };
         if (!raf) raf = requestAnimationFrame(flush);
-      } else if (e.t === "tool") {
-        addChip(CHIP[e.kind] || e.text || "Completed a task");
-        cur = null; st.phase(e.kind || "work"); keepStatusLast();
-      } else if (e.t === "done") {
-        if (e.error) addBubble("assistant", e.text || "Something went wrong. Please try again.", "error");
-        done(); return true;
-      } else if (e.t === "closed") {
-        addBubble("assistant", "Aura stopped unexpectedly. Please send your message again.", "error");
-        done(); return true;
-      }
+      } else if (e.t === "tool" || e.t === "step") { chip(e); st.phase(e.kind || "work"); keepStatusLast(); }
+      else if (e.t === "phase") { if (!stopAsked) st.phase(e.kind || "think"); }
+      else if (e.t === "done" || e.t === "closed") { finish(e); return true; }
       return false;
     }
     function poll() {
       if (finished) return;
-      api.chat_poll(sid).then(function (lines) {
+      (kind === "aura" ? api.chat_poll(sid) : api.job_poll(sid)).then(function (lines) {
+        if (finished) return;
         lines = lines || [];
         for (var k = 0; k < lines.length; k++) {
           var e; try { e = JSON.parse(lines[k]); } catch (x) { continue; }
           if (handle(e)) return;
         }
+        if (stopAsked && Date.now() - stopAsked > 6000) { finish({ t: "done", note: true, text: "Stopped." }); return; }
         delay = lines.length ? 80 : Math.min(delay + 40, 400); // fast while text flows, calmer while waiting
-        if (!finished) timer = setTimeout(poll, delay);
+        timer = setTimeout(poll, delay);
       }).catch(function () { if (!finished) timer = setTimeout(poll, 600); });
     }
-    stopFn = function () {
-      if (finished) return;
-      var partial = parts.filter(function (p) { return p.trim(); }).join("\n\n");
-      api.chat_stop(sid).catch(noop);
-      if (partial) api.chat_save(sid, partial).catch(noop);
-      addBubble("assistant", "Stopped.", "note");
-      done();
+    (run.items || []).forEach(function (it) { if (it.k === "text") cur = addBubble("assistant", it.text || ""); else chip(it); });
+    keepStatusLast();
+    v.start = function () { if (!finished && !v.live) { v.live = true; poll(); } return v; };
+    v.stopped = function () { return !!stopAsked; };
+    v.fail = function (msg) {
+      if (close(false)) { addBubble("assistant", msg || "Aura could not start. Please try again.", "error"); refreshSessions(); }
     };
-    setBusy(true, true);
-    api.chat_send(sid, text, images.length ? images : null).then(function (r) {
-      if (finished) return;
-      if (!r || !r.ok) { addBubble("assistant", (r && r.error) || "Aura could not start. Please try again.", "error"); done(); return; }
-      poll();
-    }).catch(function () {
-      addBubble("assistant", "Aura could not start. Please try again.", "error");
-      done();
-    });
-  }
-
-  /* Quick, Local, Big project, Polish: one answer when it is finished. */
-  function sendOnce(text, images) {
-    var sid = currentId;
-    var st = startStatus(mode === "big" ? "big" : mode === "polish" ? "polish" : (images.length ? "look" : "think"));
-    var stopWatch = watchSites(Date.now() / 1000 - 1);
-    setBusy(true, false);
-    api.send_message(sid, text, mode, images.length ? images : null).then(function (res) {
-      st.stop();
-      if (currentId !== sid) return;
-      var reply = (res && res.reply) || "No answer.";
-      var failed = !res || res.error || /^Error:/.test(reply);
-      addBubble("assistant", failed ? reply.replace(/^Error:\s*/, "") : reply, failed ? "error" : null);
-      return refreshSessions();
-    }).catch(function () {
-      st.stop();
-      addBubble("assistant", "Something went wrong. Please try again.", "error");
-    }).then(function () { stopWatch(); setBusy(false); });
+    v.detach = function () { close(true); };
+    v.stop = function () {
+      if (finished || stopAsked) return;
+      stopAsked = Date.now();
+      st.phase("stop");
+      api.chat_stop(sid).catch(noop);
+      v.start(); // keep listening: Python answers with "Stopped." (or the reply, if it was just finishing)
+    };
+    v.resync = function () {
+      if (!close(true)) return;
+      delete running[sid];
+      if (currentId === sid) openSession(sid);
+    };
+    view = v;
+    setRunning(sid, true);
+    return v;
   }
 
   function send() {
@@ -667,8 +721,21 @@
       var im = document.createElement("img"); im.src = picUrl(p); im.alt = "Sent picture";
       ub.insertBefore(im, ub.firstChild);
     });
-    if (mode === "claude") sendAura(text, images); else sendOnce(text, images);
+    startWork(currentId, mode, text, images);
   }
+  /* Aura mode streams from the chat's own background process; the other modes run as a background job.
+     Either way the answer is saved into THIS chat, even if you switch to another one meanwhile. */
+  function startWork(sid, m, text, images) {
+    var v = attachRun(sid, { kind: m === "claude" ? "aura" : "job", elapsed: 0, items: [],
+                             phase: m === "big" ? "big" : m === "polish" ? "polish" : (images.length ? "look" : "think") });
+    var imgs = images.length ? images : null;
+    (m === "claude" ? api.chat_send(sid, text, imgs) : api.job_start(sid, text, m, imgs)).then(function (r) {
+      if (!r || !r.ok) { v.fail((r && r.error) || "Aura could not start. Please try again."); return; }
+      if (v.stopped()) api.chat_stop(sid).catch(noop); // Stop was pressed while it was starting
+      v.start();
+    }).catch(function () { v.fail("Aura could not start. Please try again."); });
+  }
+
 
   /* ---------- modes ---------- */
   function buildPills() {
@@ -1054,6 +1121,7 @@
       return newChat();
     });
     pollOpen();
+    pollBusy();
     syncMax();
     startUpdateChecks(2700); // toast after the splash is gone
     input.focus();
@@ -1068,7 +1136,7 @@
   $("stopBtn").addEventListener("click", function () { if (stopFn) stopFn(); });
   $("newChat").addEventListener("click", function () {
     if (!api) { toast("One moment, still loading."); return; }
-    if (!guardBusy()) newChat().then(focusInput);
+    newChat().then(focusInput); // the chat you leave keeps working in the background
   });
   $("attachBtn").addEventListener("click", function () { $("fileIn").click(); });
   $("fileIn").addEventListener("change", function () { addFiles($("fileIn").files); $("fileIn").value = ""; focusInputSoon(); });

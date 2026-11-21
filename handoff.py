@@ -11,6 +11,12 @@ import requests
 
 def _ollama_url() -> str:
     try:
+        sys.path.insert(0, str(Path(__file__).parent / "src"))
+        from ollama_addr import read_address
+        return read_address(Path(__file__).parent)
+    except Exception:
+        pass
+    try:
         f = Path(__file__).parent / "ollama_url.txt"
         if f.exists():
             u = f.read_text(encoding="utf-8-sig").strip()
@@ -25,12 +31,12 @@ OLLAMA_URL = _ollama_url()
 MODEL = (os.environ.get("SUMMARY_MODEL") or (Path(__file__).parent / "model.txt").read_text(encoding="utf-8").strip())
 NUM_CTX = int(os.environ.get("QWEN_NUM_CTX", "65536"))
 ROOT = Path(__file__).parent
-PROJ = Path.home() / ".claude" / "projects" / "C--Users-User-qwen-test"
+PROJ = Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(ROOT.resolve()))  # this folder's chats
 CHUNK = 60000  # characters per Qwen call
 
 
 def ask(prompt: str) -> str:
-    r = requests.post(f"{OLLAMA_URL}/api/chat", timeout=900, json={
+    r = requests.post(f"{OLLAMA_URL}/api/chat", timeout=(10, 900), json={
         "model": MODEL, "stream": False, "think": False,
         "options": {"temperature": 0.2, "num_ctx": NUM_CTX},
         "messages": [{"role": "system", "content": "You write short, clear project notes. Plain text, bullet points."},

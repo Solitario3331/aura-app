@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 
@@ -40,9 +41,20 @@ def _read(d, sid: str) -> dict:
 
 
 def _write(d, sid: str, data: dict) -> None:
+    """Write to a temporary file first, then swap it in: a crash or a reader at the same moment never
+    sees a half-written chat."""
     p = _path(d, sid)
-    with open(p, "w", encoding="utf-8") as f:
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
+    for attempt in range(5):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError:  # Windows: another program (virus scanner...) has it open for a moment
+            if attempt == 4:
+                raise
+            time.sleep(0.05)
 
 
 def new_session(d) -> str:
