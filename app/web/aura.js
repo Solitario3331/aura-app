@@ -238,6 +238,83 @@
     };
   }
 
+  /* Progress block for Local/Quick/Big/Polish (Claude-style): ONE quiet line with the current step and a timer;
+     a chevron shows the steps done so far (no repeats, newest last). When the answer arrives it folds into
+     "Worked for 14 s · 5 steps" above it (nothing at all when there were no steps).
+     Returns { el, phase(p), step(it), settle(), stop() }. */
+  var PG_PHASE = { think: "Thinking", look: "Looking at the picture", write: "Writing the answer",
+                   wait: "Waiting for the other chat", stop: "Stopping", big: "Working on the project", polish: "Polishing" };
+  var PG_FILLER = /^(working on (it|this)|completed a task|on it)\.*$/i, PG_MAX = 12, pgSeq = 0;
+  function fmtSecs(s) { return s < 60 ? s + " s" : Math.floor(s / 60) + " min " + (s % 60) + " s"; }
+  function startProgress(phase, sinceMs) {
+    messagesEl.querySelectorAll(".working, .progress.live").forEach(function (o) { o.remove(); }); // never show two
+    var w = document.createElement("div"); w.className = "progress live";
+    var head = document.createElement("button"); head.type = "button"; head.className = "pg-head";
+    var listId = "pg-list-" + (++pgSeq);
+    head.setAttribute("aria-expanded", "false"); head.setAttribute("aria-controls", listId); head.disabled = true;
+    var g = document.createElement("span"); g.className = "pg-glyph"; g.setAttribute("aria-hidden", "true"); g.textContent = GLYPHS[4];
+    var t = document.createElement("span"); t.className = "pg-text"; t.setAttribute("aria-live", "polite");
+    var m = document.createElement("span"); m.className = "pg-time";
+    var c = document.createElement("span"); c.className = "pg-chev"; c.setAttribute("aria-hidden", "true");
+    head.appendChild(g); head.appendChild(t); head.appendChild(m); head.appendChild(c);
+    var list = document.createElement("ol"); list.className = "pg-list"; list.id = listId; list.hidden = true;
+    w.appendChild(head); w.appendChild(list);
+    messagesEl.appendChild(w);
+    scrollDown();
+    head.addEventListener("click", function () {
+      var open = head.getAttribute("aria-expanded") !== "true";
+      head.setAttribute("aria-expanded", open ? "true" : "false");
+      list.hidden = !open; w.classList.toggle("open", open);
+    });
+    var steps = [], latest = "", cur = PG_PHASE[phase] ? phase : "think", showStep = false, settled = false;
+    var t0 = Date.now() - (sinceMs || 0), gi = 4, ticks = 0;
+    function secs() { return Math.floor((Date.now() - t0) / 1000); }
+    function paint() {
+      var txt = showStep ? latest : PG_PHASE[cur] + "…";
+      if (t.textContent !== txt) t.textContent = txt;
+    }
+    function meta() {
+      var txt = fmtSecs(secs()) + (document.body.classList.contains("can-stop") ? " · esc to interrupt" : "");
+      if (m.textContent !== txt) m.textContent = txt;
+    }
+    paint(); meta();
+    var timer = setInterval(function () {
+      if (!calmMotion) { gi = (gi + 1) % GLYPHS.length; g.textContent = GLYPHS[gi]; }
+      if (calmMotion || ++ticks % 7 === 0) meta();
+    }, calmMotion ? 1000 : 140);
+    return {
+      el: w,
+      phase: function (p) {
+        if (settled || !PG_PHASE[p]) return;          // step kinds (read, run...) come with their own text
+        if (p === "think" && latest) return;          // thinking between steps: keep showing the last step
+        cur = p; showStep = false; paint();
+      },
+      step: function (it) {
+        var txt = String((it && it.text) || "").replace(/\s+/g, " ").trim();
+        if (settled || !txt || PG_FILLER.test(txt)) return;
+        latest = txt; showStep = true; paint();
+        if (steps.indexOf(txt) === -1) {
+          steps.push(txt);
+          var li = document.createElement("li"); li.textContent = txt; li.title = txt;
+          list.appendChild(li);
+          while (list.children.length > PG_MAX) list.removeChild(list.firstChild);
+          head.disabled = false; w.classList.add("has-steps");
+        }
+      },
+      settle: function () {                           // the answer is here: fold into one summary line
+        if (settled) return;
+        settled = true; clearInterval(timer);
+        if (!steps.length) { w.remove(); return; }
+        w.classList.remove("live"); w.classList.add("done");
+        t.removeAttribute("aria-live"); g.textContent = "✻";
+        t.textContent = "Worked for " + fmtSecs(secs()) + " · " + steps.length + (steps.length === 1 ? " step" : " steps");
+        m.textContent = "";
+        head.setAttribute("aria-expanded", "false"); list.hidden = true; w.classList.remove("open");
+      },
+      stop: function () { if (!settled) { settled = true; clearInterval(timer); w.remove(); } }
+    };
+  }
+
   /* ---------- chats work on their own: the page only watches the open one ---------- */
   var running = {}, view = null; // running: chat id -> working; view: the live work shown for the open chat
   function anyRunning() { return Object.keys(running).length > 0; }
@@ -489,7 +566,7 @@
     if (view) view.detach();
     var kind = run.kind === "aura" ? "aura" : "job", finished = false, timer = 0, delay = 80;
     var cur = null, pending = null, raf = 0, stopAsked = 0, elapsed = Math.max(0, +run.elapsed || 0);
-    var st = startStatus(run.phase || "think", elapsed * 1000);
+    var st = kind === "job" ? startProgress(run.phase || "think", elapsed * 1000) : startStatus(run.phase || "think", elapsed * 1000);
     var stopWatch = watchSites(Date.now() / 1000 - 1 - elapsed);
     var v = { sid: sid, kind: kind, live: false, lost: 0 };
     function flush() {
@@ -499,7 +576,7 @@
     }
     function keepStatusLast() { messagesEl.appendChild(st.el); scrollDown(); }
     function newBubble() { cur = addBubble("assistant", ""); keepStatusLast(); }
-    function chip(it) { addChip(CHIP_PREFIX + (it.text || CHIP[it.kind] || "Completed a task")); cur = null; }
+    function chip(it) { if (kind === "job") { st.step(it); return; } addChip(CHIP_PREFIX + (it.text || CHIP[it.kind] || "Completed a task")); cur = null; }
     function close(keepRunning) {
       if (finished) return false;
       finished = true; v.live = false;
@@ -514,6 +591,7 @@
       if (finished) return;
       if (raf) { cancelAnimationFrame(raf); flush(); } // draw the last text first
       if (cur && !cur.textContent.trim() && cur.parentNode) cur.parentNode.remove(); // never leave an empty bubble
+      if (kind === "job") st.settle(); // the progress block stays as one quiet summary line above the answer
       close(false);
       if (e.t === "closed") addBubble("assistant", "Aura stopped unexpectedly. Please send your message again.", "error");
       else if (e.note) addBubble("assistant", e.text || "Stopped.", "note");

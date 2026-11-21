@@ -283,6 +283,28 @@ body.sb-hidden #messages:empty::before, body.sb-hidden #messages:empty::after { 
 .st-meta { color: var(--dim); font-size: 11px; letter-spacing: .04em; white-space: nowrap; }
 @keyframes shimmerTxt { from { background-position: 130% 0; } to { background-position: -130% 0; } }
 
+/* Local/Quick progress block: one quiet line (current step + timer), steps behind a chevron, folds to a summary */
+.progress { align-self: flex-start; max-width: min(640px, 100%); font-family: var(--mono); font-size: var(--fs-xs); color: var(--dim); }
+.pg-head { display: flex; align-items: center; gap: 10px; max-width: 100%; min-height: 22px; padding: 2px 6px 2px 0; border: 0; border-radius: 3px;
+  background: none; color: inherit; font: inherit; letter-spacing: .04em; text-align: left; cursor: default; }
+.pg-head:disabled { opacity: 1; }
+.progress.has-steps .pg-head { cursor: pointer; }
+.progress.has-steps .pg-head:hover .pg-text { color: var(--text); }
+.pg-head:focus-visible { outline: 1px solid var(--acc-text); outline-offset: 2px; }
+.pg-glyph { flex: none; width: 1.2em; text-align: center; color: var(--acc-text); font-size: 15px; line-height: 1; }
+.progress.done .pg-glyph { color: var(--dim); font-size: 12px; }
+.pg-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mute); transition: color .15s; }
+.pg-time { flex: none; color: var(--dim); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pg-chev { flex: none; width: 6px; height: 6px; margin: 0 2px 0 -2px; border: solid currentColor; border-width: 0 1px 1px 0; transform: rotate(-45deg);
+  visibility: hidden; transition: transform .15s var(--ease); }
+.progress.has-steps .pg-chev { visibility: visible; }
+.progress.open .pg-chev { transform: rotate(45deg); }
+.pg-list { list-style: none; margin: 2px 0 6px 8px; padding: 0 0 0 14px; border-left: 1px solid var(--line3); }
+.pg-list li { padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+.pg-list li:last-child { color: var(--mute); }
+.progress.done .pg-list li:last-child { color: var(--dim); }
+@media (prefers-reduced-motion: reduce) { .pg-chev, .pg-text { transition: none; } }
+
 /* =====================================================================
    Composer
    ===================================================================== */

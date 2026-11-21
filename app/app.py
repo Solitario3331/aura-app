@@ -64,7 +64,8 @@ POLISH_MODEL = "claude-opus-5-5"        # Polish mode
 
 MODES = ("claude", "qwen", "auto", "big", "polish")
 IDLE_STOP_SECONDS = 20 * 60             # stop a chat's background process after 20 idle minutes
-LOCAL_TIMEOUT = 8 * 60                  # Local/Quick: no answer after 8 minutes -> stop and say so
+FILLER_STEPS = ("working on it", "working on this", "completed a task", "on it")  # never shown as a step line
+LOCAL_TIMEOUT = 15 * 60                # Local/Quick: no answer after 15 minutes -> stop and say so
 LOCAL_DEADLINE = LOCAL_TIMEOUT - 60     # the local helper itself wraps up (short summary) a minute before that
 CLAUDE_TIMEOUTS = {"auto": 10 * 60, "big": 30 * 60, "polish": 20 * 60, "claude": 10 * 60}
 AURA_SILENT_SECONDS = 15 * 60           # Aura mode: a turn with no sign of life for 15 minutes is stopped
@@ -1148,8 +1149,13 @@ class Api:
         if not job:
             return
         if isinstance(ev.get("text"), str):
-            ev["text"] = mask_names(ev["text"])[:200]
+            ev["text"] = " ".join(mask_names(ev["text"]).split())[:200]
         with job["lock"]:
+            if ev.get("t") == "step":  # the page shows one tidy line: no filler, no step twice in a row
+                text, live = ev.get("text") or "", job["live"]
+                if (not text or text.lower().rstrip(".") in FILLER_STEPS
+                        or (live and live[-1].get("k") == "chip" and live[-1].get("text") == text)):
+                    return
             if ev.get("t") == "phase":
                 job["phase"] = ev.get("kind") or "think"
             elif ev.get("t") == "step":

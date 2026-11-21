@@ -327,6 +327,31 @@ body.sb-hidden #rail { border-right: 1px solid var(--line); }
 .st-verb { font-weight: 500; color: var(--mute); animation: pulseTxt 1.8s ease-in-out infinite; }
 .st-meta { color: var(--dim); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
+/* Local/Quick progress block: one quiet line (current step + timer), steps behind a chevron, folds to a summary */
+.progress { align-self: flex-start; max-width: min(640px, 100%); font-size: 12.5px; color: var(--dim); animation: fadeIn .2s ease both; }
+.pg-head { display: flex; align-items: center; gap: 8px; max-width: 100%; min-height: 24px; padding: 2px 8px 2px 0; border: 0; border-radius: 6px;
+  background: none; color: inherit; font: inherit; text-align: left; cursor: default; }
+.pg-head:disabled { opacity: 1; }
+.progress.has-steps .pg-head { cursor: pointer; }
+.progress.has-steps .pg-head:hover .pg-text { color: var(--text); }
+.pg-head:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+.pg-glyph { flex: none; width: 18px; height: 18px; display: grid; place-items: center; color: var(--acc); }
+.pg-glyph svg { width: 100%; height: 100%; }
+.pg-glyph.dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulseTxt 1.8s ease-in-out infinite; }
+.pg-glyph.ok::before { content: ""; width: 4px; height: 8px; margin-bottom: 3px; border: solid var(--ok); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); opacity: .85; }
+.pg-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--mute); transition: color .15s ease; }
+.progress.done .pg-text { font-weight: 400; }
+.pg-time { flex: none; color: var(--dim); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pg-chev { flex: none; width: 6px; height: 6px; margin: 0 2px 0 -2px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg);
+  visibility: hidden; transition: transform .15s ease; }
+.progress.has-steps .pg-chev { visibility: visible; }
+.progress.open .pg-chev { transform: rotate(45deg); }
+.pg-list { list-style: none; margin: 2px 0 6px 8px; padding: 0 0 0 17px; border-left: 1px solid var(--line2); }
+.pg-list li { padding: 1px 0; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+.pg-list li:last-child { color: var(--mute); }
+.progress.done .pg-list li:last-child { color: var(--dim); }
+@media (prefers-reduced-motion: reduce) { .pg-chev, .pg-text { transition: none; } .pg-glyph.dot::before { animation: none; } }
+
 /* round scroll-to-bottom pill */
 #toBottom { position: absolute; left: 50%; bottom: 132px; z-index: 5; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%;
   border: 1px solid var(--line2); background: var(--overlay); color: var(--mute); box-shadow: var(--shadow-sm); opacity: 0; pointer-events: none; transform: translate(-50%, 6px);

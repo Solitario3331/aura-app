@@ -58,8 +58,6 @@ STARTED = time.time()
 DEADLINE = _env_num("AGENT_DEADLINE", 0)           # seconds for the whole task (0 = no limit); the app sets it
 CONNECT_TIMEOUT = 10                               # a PC that is off or blocked must not keep us waiting
 READ_GAP = _env_num("AGENT_READ_GAP", 240)         # longest silence from the helper (it streams, so silence = stuck)
-THINK_MAX_SECONDS = _env_num("AGENT_THINK_MAX", 45)  # "thinking" longer than this is cut; the step reruns without it
-THINK_STEPS = 2                                    # think only on the first steps (planning), never on every tool turn
 
 
 def _model_name() -> str:
@@ -357,10 +355,6 @@ def emit(ev: dict) -> None:
             pass
 
 
-class ThinkTooLong(Exception):
-    """The helper 'thought' longer than THINK_MAX_SECONDS: the step is asked again without thinking."""
-
-
 def _chat(messages, tools, think: bool, vary: bool) -> dict:
     """One request to Ollama, streamed: a silent or unreachable helper is noticed within seconds/minutes
     instead of after 15 minutes. Exits with a clear message if Ollama cannot be reached."""
@@ -386,7 +380,7 @@ def _chat(messages, tools, think: bool, vary: bool) -> dict:
             return _chat(messages, tools, False, vary)
         log(f"OLLAMA ERROR {r.status_code}: {text}")
         sys.exit(f"Ollama returned an error ({r.status_code}): {text[:300]}")
-    content, calls, think_started = [], [], None
+    content, calls, thinking = [], [], []
     try:
         with r:
             for raw in r.iter_lines():
@@ -400,11 +394,8 @@ def _chat(messages, tools, think: bool, vary: bool) -> dict:
                     log(f"OLLAMA ERROR (stream): {str(chunk['error'])[:500]}")
                     sys.exit(f"Ollama returned an error: {str(chunk['error'])[:300]}")
                 m = chunk.get("message") or {}
-                if m.get("thinking"):
-                    if think_started is None:
-                        think_started = time.time()
-                    elif time.time() - think_started > THINK_MAX_SECONDS:
-                        raise ThinkTooLong()
+                if m.get("thinking"):  # never cut short: thinking is what makes the answers good
+                    thinking.append(m["thinking"])
                 if m.get("content"):
                     content.append(m["content"])
                 if m.get("tool_calls"):
@@ -417,6 +408,8 @@ def _chat(messages, tools, think: bool, vary: bool) -> dict:
             sys.exit(f"Ollama took too long to answer (no reply for {int(READ_GAP // 60)} min). Try again later.")
         sys.exit(f"Lost the connection to Ollama at {OLLAMA_URL}. Is that PC still on?")
     msg = {"role": "assistant", "content": "".join(content)}
+    if thinking:  # kept in the history, like the old (non-streamed) reply did
+        msg["thinking"] = "".join(thinking)
     if calls:
         msg["tool_calls"] = calls
     return msg
@@ -448,16 +441,9 @@ def main(task: str, images: list[str] | None = None) -> None:
             why_stop = "time"
             log("DEADLINE: stopping after step " + str(step - 1))
             break
-        use_think = think and step <= THINK_STEPS
         if step > 1:
             emit({"t": "phase", "kind": "think"})
-        try:
-            msg = _chat(messages, tools, use_think, vary)
-        except ThinkTooLong:
-            log(f"THINK: longer than {int(THINK_MAX_SECONDS)} s, asking again without thinking")
-            think = False
-            emit({"t": "phase", "kind": "write"})
-            msg = _chat(messages, tools, False, vary)
+        msg = _chat(messages, tools, think, vary)  # the same thinking decision on every step, as before
         messages.append(msg)
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -490,7 +476,7 @@ def main(task: str, images: list[str] | None = None) -> None:
                          "what you finished and what is left."})
         try:
             final = (_chat(messages, [], False, False).get("content") or "").strip()
-        except (SystemExit, ThinkTooLong):
+        except SystemExit:
             final = ""
     print(final or ("I ran out of time before finishing. Try asking for a smaller piece of the task."
                     if why_stop == "time" else
