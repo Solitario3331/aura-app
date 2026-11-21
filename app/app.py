@@ -34,6 +34,7 @@ else:
 sys.path.insert(0, str(ROOT / "src"))
 
 import chat_store
+import no_window
 import updater
 from aura_events import Translator
 from aura_mask import mask_names
@@ -65,7 +66,10 @@ IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "
 STEP_LINE = re.compile(r"^\[\d+\] [A-Za-z_]+: ")   # agent.py step lines, never shown in the chat
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
-NOT_SET_UP = "Aura is not set up on this PC yet. Please ask the person who installed it to finish the setup."
+NOT_SET_UP = ("Aura's main helper is not installed on this PC yet. Double-click install.bat in the Aura folder "
+              "to finish the setup, then restart Aura.")
+NOT_SIGNED_IN = ("Aura is not signed in on this PC yet. Use the sign-in / terminal button in Aura (or run install.bat "
+                 "again), sign in with your account, then try again.")
 TRY_AGAIN = "Aura could not finish this one. Please try again."
 CANT_START = "Aura could not start. Please try again in a moment."
 INTERNAL_ERROR = "Something went wrong inside Aura. Please try again."
@@ -112,13 +116,34 @@ def _log(text: str) -> None:
         pass
 
 
+def _needs_login(text: str) -> bool:
+    """A short error saying the Claude login is missing/expired (long texts are real answers, never matched)."""
+    low = (text or "").lower()
+    return len(low) < 600 and any(k in low for k in (
+        "run /login", "not logged in", "invalid api key", "please log in", "oauth token has expired"))
+
+
 def _friendly(text: str) -> str:
     """Turn raw output into something safe to show: names masked, known failures explained."""
     text = text or ""
     low = text.lower()
+    short = len(low) < 600   # error messages are short; long texts are real answers
+    if _needs_login(text):
+        _log("claude not signed in: " + text[-500:])
+        return NOT_SIGNED_IN
+    if short and "ollama" in low and "not found" in low and "model" in low:
+        _log("local model missing: " + text[-500:])
+        return ("Aura's local helper is reachable, but its brain (model) is not installed there yet. "
+                "Run install.bat again, or ask the person who set up Aura.")
+    if short and "ollama took too long" in low:
+        _log("local helper slow: " + text[-500:])
+        return "Aura's local helper is very busy right now. Please try again in a few minutes."
     if "11434" in low or ("ollama" in low and ("connect" in low or "refused" in low or "not found" in low)):
         _log("local helper unreachable: " + text[-500:])
-        return "Aura's local helper is not reachable right now. Make sure the PC with the graphics card is on, then try again."
+        if os.environ.get("OLLAMA_URL", "").lower().startswith(("http://localhost", "http://127.")) \
+                or not (ROOT / "ollama_url.txt").exists():
+            return "Aura's local helper is not running on this PC. Start Ollama (or restart the PC), then try again."
+        return "Can't reach Amar's PC (the one with the big graphics card). Is it on? Then try again."
     if "traceback (most recent call last)" in low:
         _log("traceback: " + text[-3000:])
         return INTERNAL_ERROR
@@ -133,15 +158,11 @@ def _clean_env() -> dict:
 
 
 def _hidden() -> dict:
-    """subprocess options: no console window and no 'working in background' busy cursor."""
-    opts = {"creationflags": NO_WINDOW}
-    try:
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= 0x80  # STARTF_FORCEOFFFEEDBACK
-        opts["startupinfo"] = si
-    except Exception:
-        pass
-    return opts
+    """subprocess options: no console window and no 'working in background' busy cursor (src/no_window.py)."""
+    return no_window.hidden()
+
+
+CHILD_PY = no_window.child_python()     # python.exe, never pythonw.exe: pythonw's own children would flash windows
 
 
 def _kill_tree(proc) -> None:
@@ -228,7 +249,8 @@ def _local_version() -> str:
     return _read_text(ROOT / "VERSION") or "0.1.0"
 
 
-DEFAULT_UPDATE = {"repo": "Solitario3331/aura-app", "branch": "main", "token": ""}
+LOCAL_ONLY = ("update.json", "theme.txt", "ollama_url.txt")   # per-PC files an update must never overwrite
+DEFAULT_UPDATE = {"repo":"Solitario3331/aura-app", "branch": "main", "token": ""}
 
 
 def _update_config() -> dict:
@@ -320,7 +342,7 @@ def run_claude(prompt, model, extra=None):
         err = (proc.stderr or "").strip()
         if err:
             _log("claude -p stderr (exit {}): {}".format(proc.returncode, err[-3000:]))
-            return TRY_AGAIN
+            return NOT_SIGNED_IN if _needs_login(err) else TRY_AGAIN
         return "No answer."
     except subprocess.TimeoutExpired:
         return "Aura took too long and stopped. Try a smaller request."
@@ -334,7 +356,8 @@ def run_claude(prompt, model, extra=None):
 # ---------------------------------------------------------------------------
 SW_HIDE, SW_SHOW, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE = 0, 5, 6, 3, 9
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
-GWL_STYLE = -16
+GWL_STYLE, GWL_EXSTYLE = -16, -20
+WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x00000080, 0x00040000
 WS_POPUP, WS_CHILD, WS_CLIPCHILDREN = 0x80000000, 0x40000000, 0x02000000
 WS_CAPTION, WS_THICKFRAME, WS_MINIMIZEBOX, WS_MAXIMIZEBOX = 0x00C00000, 0x00040000, 0x00020000, 0x00010000
 VK_LBUTTON = 0x01
@@ -350,6 +373,7 @@ def _user32():
             "FindWindowExW": (w.HWND, [w.HWND, w.HWND, w.LPCWSTR, w.LPCWSTR]),
             "GetWindowThreadProcessId": (w.DWORD, [w.HWND, ctypes.POINTER(w.DWORD)]),
             "IsWindow": (w.BOOL, [w.HWND]),
+            "IsWindowVisible": (w.BOOL, [w.HWND]),
             "IsZoomed": (w.BOOL, [w.HWND]),
             "ShowWindow": (w.BOOL, [w.HWND, ctypes.c_int]),
             "MoveWindow": (w.BOOL, [w.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, w.BOOL]),
@@ -903,7 +927,7 @@ class Api:
             if len(text) > MAX_ARG_CHARS:
                 return "Error: That message is too long for this mode. Please shorten it, or use Aura mode."
             proc = subprocess.run(
-                [sys.executable, str(ROOT / "agent.py"), text] + img_args,
+                [CHILD_PY, str(ROOT / "agent.py"), text] + img_args,
                 cwd=str(ROOT), env=_clean_env(), capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=900, **_hidden())
             out = (proc.stdout or "").strip()
@@ -985,13 +1009,14 @@ class Api:
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                 for info in zf.infolist():
                     parts = info.filename.split("/", 1)
-                    if info.is_dir() or len(parts) < 2 or parts[1] == "update.json":
-                        continue
+                    if info.is_dir() or len(parts) < 2 or parts[1] in LOCAL_ONLY \
+                            or parts[1].split("/")[0].lower() in ("chats", "logs"):
+                        continue  # this PC's own settings and data are never replaced
                     files[parts[1]] = zf.read(info)
             written = updater.apply_update(files, ROOT)
             if "requirements.txt" in written:
                 try:
-                    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                    subprocess.run([CHILD_PY, "-m", "pip", "install", "-q", "--disable-pip-version-check",
                                     "-r", str(ROOT / "requirements.txt")], cwd=str(ROOT), timeout=300, **_hidden())
                 except Exception as exc:
                     _log("pip after update failed: " + repr(exc))
@@ -1041,6 +1066,9 @@ class Api:
             except Exception as exc:
                 _log("chat event error: " + repr(exc))
                 return []
+            for ev in events or []:
+                if ev.get("t") == "done" and ev.get("error") and _needs_login(ev.get("text", "")):
+                    ev["text"] = NOT_SIGNED_IN
             if events:
                 try:
                     kind = tool_kind_from_line(line)
@@ -1125,7 +1153,9 @@ class Api:
                 return
             _log("chat {} is {} tokens: writing the handoff summary".format(sid, tokens))
             before = transcript.stat().st_mtime
-            r = subprocess.run([sys.executable, str(ROOT / "handoff.py"), "--hook", "--print"],
+            if not (ROOT / "handoff.py").exists():
+                return
+            r = subprocess.run([CHILD_PY, str(ROOT / "handoff.py"), "--hook", "--print"],
                                input=json.dumps({"transcript_path": str(transcript)}), text=True, capture_output=True,
                                encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=900, env=_clean_env(),
                                **_hidden())
@@ -1313,6 +1343,74 @@ class Api:
 # ---------------------------------------------------------------------------
 # Start-up
 # ---------------------------------------------------------------------------
+APP_ID = "Aura.App"   # same id as the Aura shortcut (make_shortcut.ps1), so Windows groups them under one icon
+
+
+def _set_window_app_id(hwnd, icon: Path) -> None:
+    """Tell the taskbar directly which app this window is and which icon to show (window property store).
+    Needed because the venv's pythonw.exe is only a launcher: without this the taskbar may show the Python
+    icon, a blank icon, or group the window under a different (missing) entry."""
+    from ctypes import wintypes as w
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_uint32), ("d2", ctypes.c_uint16), ("d3", ctypes.c_uint16), ("d4", ctypes.c_ubyte * 8)]
+
+    class PROPERTYKEY(ctypes.Structure):
+        _fields_ = [("fmtid", GUID), ("pid", w.DWORD)]
+
+    class PROPVARIANT(ctypes.Structure):   # only the VT_LPWSTR case; padded to the full 24 bytes
+        _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort), ("r3", ctypes.c_ushort),
+                    ("val", ctypes.c_void_p), ("pad", ctypes.c_void_p)]
+
+    def guid(d1, d2, d3, d4):
+        return GUID(d1, d2, d3, (ctypes.c_ubyte * 8)(*d4))
+
+    iid_store = guid(0x886D8EEB, 0x8CF2, 0x4446, (0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99))
+    fmt = guid(0x9F4C2855, 0x9F79, 0x4B39, (0xA8, 0xD0, 0xE1, 0xD4, 0x2D, 0xE1, 0xD5, 0xF3))
+    py = ROOT / ".venv" / "Scripts" / "pythonw.exe"
+    values = (  # relaunch details first, the id last (setting the id makes the taskbar read the rest)
+        (2, '"{}" "{}"'.format(py if py.exists() else sys.executable, ROOT / "app" / "app.py")),  # RelaunchCommand
+        (4, "Aura"),                                                                  # RelaunchDisplayNameResource
+        (3, str(icon) + ",0"),                                                        # RelaunchIconResource
+        (5, APP_ID),                                                                  # AppUserModel.ID
+    )
+    shell32 = ctypes.WinDLL("shell32")
+    shell32.SHGetPropertyStoreForWindow.argtypes = [w.HWND, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+    shell32.SHGetPropertyStoreForWindow.restype = ctypes.c_long
+    store = ctypes.c_void_p()
+    hr = shell32.SHGetPropertyStoreForWindow(hwnd, ctypes.byref(iid_store), ctypes.byref(store))
+    if hr != 0 or not store.value:
+        _log("icon: no window property store (hr={})".format(hr))
+        return
+    vtbl = ctypes.cast(ctypes.cast(store, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
+    set_value = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(PROPERTYKEY),
+                                   ctypes.POINTER(PROPVARIANT))(vtbl[6])
+    commit = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[7])
+    release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+    try:
+        for pid, text in values:
+            buf = ctypes.create_unicode_buffer(text)
+            pv = PROPVARIANT(31, 0, 0, 0, ctypes.cast(buf, ctypes.c_void_p), None)  # VT_LPWSTR
+            hr = set_value(store, ctypes.byref(PROPERTYKEY(fmt, pid)), ctypes.byref(pv))
+            if hr != 0:
+                _log("icon: window property {} failed (hr={})".format(pid, hr))
+        commit(store)
+    finally:
+        release(store)
+
+
+def _force_taskbar_button(u, hwnd) -> None:
+    """Make sure the window owns a normal taskbar button (app window, not a tool window)."""
+    ex = u.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    want = (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW
+    if want != ex:
+        _log("icon: fixing window style for the taskbar ({:#x} -> {:#x})".format(ex & 0xFFFFFFFF, want & 0xFFFFFFFF))
+        u.SetWindowLongW(hwnd, GWL_EXSTYLE, _as_long(want))
+        if u.IsWindowVisible(hwnd):   # the taskbar only notices a style change when the window is shown again
+            u.ShowWindow(hwnd, SW_HIDE)
+            u.ShowWindow(hwnd, SW_SHOW)
+
+
 def _set_window_icon() -> None:
     """Give the window and taskbar the Aura icon and drop the native title bar (Windows only)."""
     try:
@@ -1324,6 +1422,14 @@ def _set_window_icon() -> None:
         if not hwnd:
             _log("icon: window not found")
             return
+        try:
+            _set_window_app_id(hwnd, icon)
+        except Exception as exc:
+            _log("icon: app id failed: " + repr(exc))
+        try:
+            _force_taskbar_button(u, hwnd)
+        except Exception as exc:
+            _log("icon: taskbar button check failed: " + repr(exc))
 
         def put_icon() -> None:
             big = u.LoadImageW(None, str(icon), 1, 256, 256, 0x10)    # IMAGE_ICON, LR_LOADFROMFILE
@@ -1440,7 +1546,8 @@ def _theme() -> str:
 
 
 def _ensure_shortcut() -> None:
-    """Put an Aura icon on the desktop if there is none (installed copies have make_shortcut.ps1)."""
+    """Put an Aura icon on the desktop if there is none, and fix an old one that lacks the Aura app id/icon
+    (installed copies have make_shortcut.ps1)."""
     try:
         script = ROOT / "make_shortcut.ps1"
         if script.exists():
@@ -1453,13 +1560,17 @@ def _ensure_shortcut() -> None:
 def main() -> None:
     import webview
 
-    _read_ollama_url()
-    _ensure_shortcut()
-
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Aura.App")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)  # before any window exists
     except Exception:
         pass
+    for folder in (CHATS_DIR, LOG_FILE.parent):  # a fresh install has neither
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    _read_ollama_url()
+    _ensure_shortcut()
 
     width, height, x, y = _window_geometry()
     api_obj = Api()

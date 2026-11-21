@@ -31,9 +31,13 @@ echo OK
 
 echo.
 echo STEP 2 of 5: Aura's parts
-if not exist .venv python -m venv .venv
-call .venv\Scripts\activate.bat
-python -m pip install --disable-pip-version-check -q -r requirements.txt
+if not exist .venv\Scripts\python.exe python -m venv .venv
+if not exist .venv\Scripts\python.exe (
+  echo Could not set up Python for Aura. Restart the PC and run install.bat again.
+  pause
+  exit /b
+)
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r requirements.txt
 if errorlevel 1 (
   echo Could not install the parts. Check your internet and run this again.
   pause

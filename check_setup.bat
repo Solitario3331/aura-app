@@ -13,6 +13,7 @@ if errorlevel 1 (
   findstr /i /c:"%QWEN_MODEL%" "%TEMP%\aura_tags.txt" >nul && (echo [OK]  Model %QWEN_MODEL%) || echo [BAD] Model %QWEN_MODEL% is missing on that PC
 )
 where claude >nul 2>&1 && (echo [OK]  Claude Code installed) || echo [BAD] Claude Code missing - run the setup file
-if exist update.json (echo [OK]  Updates are set up) else (echo [BAD] update.json missing)
+if exist VERSION (set /p AURA_VER=<VERSION) else (set AURA_VER=unknown)
+echo [OK]  Aura version %AURA_VER% ^(updates come from the Update button^)
 echo.
 pause

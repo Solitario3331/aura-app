@@ -42,6 +42,17 @@ LOGS = ROOT / "logs"
 SRC.mkdir(exist_ok=True)
 LOGS.mkdir(exist_ok=True)
 
+sys.path.insert(0, str(SRC))
+try:
+    from no_window import child_python, hidden as _hidden  # no console windows popping up
+except Exception:
+    def _hidden():
+        return {}
+
+    def child_python():
+        return sys.executable
+PY = child_python()
+
 SYSTEM = (
     "You write Python code. Reply with ONE complete Python file inside a single "
     "```python code block and nothing else. Follow the spec exactly."
@@ -98,6 +109,7 @@ def ask_claude_cli(prompt: str) -> str | None:
             [exe, "-p", "--model", CLAUDE_MODEL, "Do not use any tools. " + SYSTEM + "\n\n" + prompt],
             capture_output=True, text=True, timeout=600,
             cwd=tempfile.gettempdir(),  # avoid loading the project's CLAUDE.md
+            **_hidden(),
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -109,14 +121,14 @@ def run_checks(task_dir: Path, name: str) -> tuple[bool, str]:
     env = {**os.environ, "PYTHONPATH": str(SRC)}
     out = ""
     lint = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "--select", "E9,F", str(SRC / f"{name}.py")],  # only real errors, not style
-        capture_output=True, text=True,
+        [PY, "-m", "ruff", "check", "--select", "E9,F", str(SRC / f"{name}.py")],  # only real errors, not style
+        capture_output=True, text=True, **_hidden(),
     )
     if lint.returncode != 0 and "No module named ruff" not in lint.stderr:
         out += "LINT ERRORS:\n" + lint.stdout + lint.stderr
     test = subprocess.run(
-        [sys.executable, "-m", "pytest", "-x", "-q", str(task_dir / "test_task.py")],
-        capture_output=True, text=True, env=env,
+        [PY, "-m", "pytest", "-x", "-q", str(task_dir / "test_task.py")],
+        capture_output=True, text=True, env=env, **_hidden(),
     )
     out += "\nTEST OUTPUT:\n" + test.stdout[-3000:] + test.stderr[-1000:]
     return (lint.returncode == 0 or "No module named ruff" in lint.stderr) and test.returncode == 0, out

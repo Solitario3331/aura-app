@@ -61,6 +61,11 @@ MODEL = _model_name()
 
 sys.path.insert(0, str(ROOT / "src"))
 try:
+    from no_window import hidden as _hidden
+except Exception:  # helper missing: plain behavior
+    def _hidden():
+        return {}
+try:
     from browse_policy import wants_browser
 except Exception:  # if the helper is missing, behave as before (browsing allowed)
     def wants_browser(text):
@@ -211,7 +216,7 @@ def _run_powershell(cmd: str) -> str:
     if BLOCKED.search(cmd):
         return "REFUSED: this command can delete/change things and is not allowed."
     r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True,
-                       text=True, errors="replace", timeout=1800, cwd=str(HOME))
+                       text=True, errors="replace", timeout=1800, cwd=str(HOME), **_hidden())
     return ((r.stdout or "") + (r.stderr or ""))[-3000:] or f"(done, exit code {r.returncode})"
 
 
@@ -236,7 +241,7 @@ def _delete_to_recycle_bin(path: str) -> str:
     ps = ("Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::"
           f"{kind}('{quoted}','OnlyErrorDialogs','SendToRecycleBin')")
     r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
-                       text=True, errors="replace", timeout=120)
+                       text=True, errors="replace", timeout=120, **_hidden())
     return f"moved to Recycle Bin: {p}" if r.returncode == 0 else f"ERROR: {(r.stderr or '')[-500:]}"
 
 
