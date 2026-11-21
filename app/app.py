@@ -228,13 +228,23 @@ def _local_version() -> str:
     return _read_text(ROOT / "VERSION") or "0.1.0"
 
 
+DEFAULT_UPDATE = {"repo": "Solitario3331/aura-app", "branch": "main", "token": ""}
+
+
 def _update_config() -> dict:
+    """Where updates come from: built in, so a copy without update.json still updates."""
+    cfg = dict(DEFAULT_UPDATE)
     try:
-        with open(ROOT / "update.json", "r", encoding="utf-8") as f:
+        with open(ROOT / "update.json", "r", encoding="utf-8-sig") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            for k in ("repo", "branch", "token"):
+                v = data.get(k)
+                if isinstance(v, str) and v.strip() and "OWNER" not in v:
+                    cfg[k] = v.strip()
     except (OSError, ValueError):
-        return {}
+        pass
+    return cfg
 
 
 def _github_headers(token: str) -> dict:
@@ -972,6 +982,12 @@ class Api:
                         continue
                     files[parts[1]] = zf.read(info)
             written = updater.apply_update(files, ROOT)
+            if "requirements.txt" in written:
+                try:
+                    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                                    "-r", str(ROOT / "requirements.txt")], cwd=str(ROOT), timeout=300, **_hidden())
+                except Exception as exc:
+                    _log("pip after update failed: " + repr(exc))
             return {"status": "Updated {} files. Please restart the app.".format(len(written))}
         except Exception as exc:
             _log("update failed: " + repr(exc))
@@ -1404,17 +1420,25 @@ def _read_ollama_url() -> None:
         _log("ollama_url.txt failed: " + repr(exc))
 
 
-def _ensure_shortcut() -> None:
-    """Put an Aura icon on the desktop if there is none (installed copies only: they have aura.bat)."""
+def _theme() -> str:
+    """'hermes' = professional look; anything else = cyberpunk. theme.txt is optional."""
+    t = os.environ.get("AURA_THEME", "")
     try:
-        bat = ROOT / "aura.bat"
-        if not bat.exists():
-            return
-        ps = ("$d=[Environment]::GetFolderPath('Desktop');$l=Join-Path $d 'Aura.lnk';"
-              "if(-not (Test-Path $l)){$s=(New-Object -ComObject WScript.Shell).CreateShortcut($l);"
-              "$s.TargetPath='%s';$s.WorkingDirectory='%s';$s.IconLocation='%s';$s.WindowStyle=7;$s.Save()}"
-              % (bat, ROOT, ROOT / "app" / "aura_icon4.ico"))
-        subprocess.Popen(["powershell", "-NoProfile", "-Command", ps], **_hidden())
+        f = ROOT / "theme.txt"
+        if not t and f.exists():
+            t = f.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        pass
+    return t.lower()
+
+
+def _ensure_shortcut() -> None:
+    """Put an Aura icon on the desktop if there is none (installed copies have make_shortcut.ps1)."""
+    try:
+        script = ROOT / "make_shortcut.ps1"
+        if script.exists():
+            subprocess.Popen(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-IfMissing"],
+                             **_hidden())
     except Exception as exc:
         _log("shortcut failed: " + repr(exc))
 
@@ -1440,7 +1464,7 @@ def main() -> None:
 
     webview.create_window(
         "Aura",
-        url=str(ROOT / "app" / ("web_hermes" if os.environ.get("AURA_THEME") == "hermes" else "web") / "index.html"),
+        url=str(ROOT / "app" / ("web_hermes" if _theme() == "hermes" else "web") / "index.html"),
         js_api=api_obj,
         width=width,
         height=height,
