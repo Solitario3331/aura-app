@@ -953,7 +953,11 @@ class Api:
             if not repo or "OWNER" in repo:
                 return {"status": "Updates are not set up yet.", "newer": False}
             import requests
-            url = "https://api.github.com/repos/{}/contents/VERSION?ref={}".format(repo, cfg.get("branch", "main"))
+            branch = cfg.get("branch", "main")
+            if cfg.get("token"):
+                url = "https://api.github.com/repos/{}/contents/VERSION?ref={}".format(repo, branch)
+            else:  # public repo: plain file links have no strict request limit (the API allows only 60 an hour per home)
+                url = "https://raw.githubusercontent.com/{}/{}/VERSION".format(repo, branch)
             resp = requests.get(url, headers=_github_headers(cfg.get("token", "")), timeout=15)
             resp.raise_for_status()
             remote = resp.text.strip()
@@ -971,7 +975,10 @@ class Api:
             if not repo or "OWNER" in repo:
                 return {"status": "Update failed: updates are not set up."}
             import requests
-            url = "https://api.github.com/repos/{}/zipball/{}".format(repo, cfg.get("branch", "main"))
+            if cfg.get("token"):
+                url = "https://api.github.com/repos/{}/zipball/{}".format(repo, cfg.get("branch", "main"))
+            else:
+                url = "https://github.com/{}/archive/refs/heads/{}.zip".format(repo, cfg.get("branch", "main"))
             resp = requests.get(url, headers=_github_headers(cfg.get("token", "")), timeout=60)
             resp.raise_for_status()
             files = {}
