@@ -1300,8 +1300,11 @@ class Api:
             if cfg.get("token"):
                 url = "https://api.github.com/repos/{}/contents/VERSION?ref={}".format(repo, branch)
             else:  # public repo: plain file links have no strict request limit (the API allows only 60 an hour per home)
-                url = "https://raw.githubusercontent.com/{}/{}/VERSION".format(repo, branch)
-            resp = requests.get(url, headers=_github_headers(cfg.get("token", "")), timeout=15)
+                # a changing query keeps GitHub's 5-minute file cache from hiding a brand-new version
+                url = "https://raw.githubusercontent.com/{}/{}/VERSION?t={}".format(repo, branch, int(time.time()))
+            hdrs = _github_headers(cfg.get("token", ""))
+            hdrs["Cache-Control"] = "no-cache"
+            resp = requests.get(url, headers=hdrs, timeout=15)
             resp.raise_for_status()
             remote = resp.text.strip()
             if updater.is_newer(remote, _local_version()):
