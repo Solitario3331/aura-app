@@ -1,0 +1,1388 @@
+"""Aura desktop app: the Python side (window, chats, helpers, browser pane).
+
+The window shows app/web/index.html. The page calls the public methods of `Api`
+through window.pywebview.api, so their names must never change. Every public
+method catches its own errors and returns a safe value, so the page never hangs.
+Small tested helpers live in src/ (tests in tasks/).
+"""
+import base64
+import ctypes
+import functools
+import http.server
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import uuid
+import webbrowser
+import zipfile
+from pathlib import Path
+
+if getattr(sys, "frozen", False):
+    ROOT = Path(sys.executable).parent
+else:
+    ROOT = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(ROOT / "src"))
+
+import chat_store
+import updater
+from aura_events import Translator
+from aura_mask import mask_names
+from chat_context import build_context
+from frame_policy import can_embed
+from site_finder import newest_html
+from tool_kind import tool_kind_from_line
+from url_input import normalize_input
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+CHATS_DIR = ROOT / "chats"
+PICS_DIR = CHATS_DIR / "_pics"          # the app's own copies of sent pictures (kept two days)
+LOG_FILE = ROOT / "logs" / "aura_app.log"
+CTL_FILE = ROOT / "logs" / "aura_ctl.json"
+
+AURA_MODEL = "claude-haiku-5-5"         # Aura mode (streaming chat)
+HELPER_MODEL = "claude-sonnet-5-5"      # Big project, and Quick mode when the local helper fails
+POLISH_MODEL = "claude-opus-5-5"        # Polish mode
+
+MODES = ("claude", "qwen", "auto", "big", "polish")
+IDLE_STOP_SECONDS = 20 * 60             # stop a chat's background process after 20 idle minutes
+PICS_KEEP_SECONDS = 2 * 86400
+MAX_ARG_CHARS = 30000                   # Windows command lines are limited to ~32k characters
+SITE_SKIP = ("node_modules", "vendor", "__pycache__", "venv", "site-packages")
+IMAGE_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
+STEP_LINE = re.compile(r"^\[\d+\] [A-Za-z_]+: ")   # agent.py step lines, never shown in the chat
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+NOT_SET_UP = "Aura is not set up on this PC yet. Please ask the person who installed it to finish the setup."
+TRY_AGAIN = "Aura could not finish this one. Please try again."
+CANT_START = "Aura could not start. Please try again in a moment."
+INTERNAL_ERROR = "Something went wrong inside Aura. Please try again."
+
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+AURA_PERSONA = " ".join((
+    "You are Aura, a friendly personal assistant app. Your name is Aura.",
+    "Never mention or hint at Claude, Anthropic, Qwen, Ollama, Opus, Sonnet, Haiku, model names,",
+    "other AIs, local models, tools, hooks, or how you work inside.",
+    "If asked who or what you are, say you are Aura, built by Amar & Arry",
+    "(if asked who made or built you, answer: \"I'm Aura, built by Amar & Arry.\").",
+    "If anyone asks who Amar or Arry are, or asks anything about them, reply ONLY with a short cute line",
+    "saying they are two lovebirds making something cute together (add a heart), with no other details about them.",
+    "When you do something on the PC, just say what you did in plain simple words.",
+    "Never ask the user to approve a command or to run something themselves; if something is blocked,",
+    "say you could not do it. Keep answers short. Follow the CLAUDE.md rules for who does the work.",
+    "To open a website, use do.bat (it opens the site inside Aura); never start a browser yourself.",
+    "Open a website ONLY when the user asks to browse, open a site or look something up online;",
+    "for 'show me', 'give me' or any request for information, a recipe or an answer, write the answer in the chat.",
+))
+
+AURA_ALLOWED = [
+    "Read", "Glob", "Grep",
+    "Bash(do.bat:*)", "Bash(./do.bat:*)", "Bash(cmd.exe /c do.bat:*)",
+    "PowerShell(.\\do.bat:*)", "PowerShell(do.bat:*)", "PowerShell(cmd /c do.bat:*)",
+    "Bash(python runner.py:*)", "Bash(.venv/Scripts/python.exe runner.py:*)",
+    "PowerShell(.venv\\Scripts\\python.exe runner.py:*)",
+    "PowerShell(Start-Process:*)", "PowerShell(start:*)", "Bash(start:*)", "Bash(cmd.exe /c start:*)",
+]
+ONE_SHOT_ALLOWED = ["Bash(do.bat:*)", "Bash(python runner.py:*)", "Bash(.venv/Scripts/python.exe runner.py:*)"]
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+def _log(text: str) -> None:
+    """Technical details go to a log file, never to the screen."""
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + str(text).rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def _friendly(text: str) -> str:
+    """Turn raw output into something safe to show: names masked, known failures explained."""
+    text = text or ""
+    low = text.lower()
+    if "11434" in low or ("ollama" in low and ("connect" in low or "refused" in low or "not found" in low)):
+        _log("local helper unreachable: " + text[-500:])
+        return "Aura's local helper is not reachable right now. Make sure the PC with the graphics card is on, then try again."
+    if "traceback (most recent call last)" in low:
+        _log("traceback: " + text[-3000:])
+        return INTERNAL_ERROR
+    return mask_names(text)
+
+
+def _clean_env() -> dict:
+    """Environment for helper programs: no settings leaking in from a parent Claude session."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_CODE", "CLAUDECODE", "QWEN_MODEL"))}
+    env.update(AURA_APP="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    return env
+
+
+def _hidden() -> dict:
+    """subprocess options: no console window and no 'working in background' busy cursor."""
+    opts = {"creationflags": NO_WINDOW}
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= 0x80  # STARTF_FORCEOFFFEEDBACK
+        opts["startupinfo"] = si
+    except Exception:
+        pass
+    return opts
+
+
+def _kill_tree(proc) -> None:
+    """Stop a helper process and everything it started (Windows keeps children alive otherwise)."""
+    try:
+        if proc.stdin:
+            proc.stdin.close()
+    except Exception:
+        pass
+    if proc.poll() is not None:
+        return
+    try:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10, **_hidden())
+    except Exception:
+        pass
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+    except Exception:
+        pass
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+    except OSError:
+        return ""
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _side_file(sid, ext: str) -> Path:
+    """Per-chat side files: .claude (conversation id), .summary (handoff), .site (its website)."""
+    return CHATS_DIR / (str(sid) + ext)
+
+
+def _valid_pictures(images) -> list:
+    return [im for im in (images or []) if isinstance(im, dict) and im.get("data")]
+
+
+def _user_line(text: str, images: list) -> str:
+    """How a user message is stored in the chat history."""
+    return (text or "") + (" [" + str(len(images)) + " picture(s)]" if images else "")
+
+
+def _save_pictures(images: list, folder: Path) -> list:
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for im in images:
+        path = folder / (uuid.uuid4().hex + IMAGE_EXT.get(im.get("media_type"), ".png"))
+        path.write_bytes(base64.b64decode(im["data"]))
+        paths.append(str(path))
+    return paths
+
+
+def _prune_old_pictures() -> None:
+    try:
+        now = time.time()
+        for old in PICS_DIR.glob("*"):
+            try:
+                if now - old.stat().st_mtime > PICS_KEEP_SECONDS:
+                    old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _history(sid, since_tag=None) -> str:
+    """What was already said in this chat (maybe in another mode), so the current mode knows."""
+    try:
+        messages = chat_store.load_session(CHATS_DIR, sid)["messages"]
+        return build_context(messages, since_tag=since_tag) if since_tag else build_context(messages)
+    except Exception:
+        return ""
+
+
+def _local_version() -> str:
+    return _read_text(ROOT / "VERSION") or "0.1.0"
+
+
+def _update_config() -> dict:
+    try:
+        with open(ROOT / "update.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _github_headers(token: str) -> dict:
+    headers = {"Accept": "application/vnd.github.raw"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
+
+
+# ---------------------------------------------------------------------------
+# Claude conversations
+# ---------------------------------------------------------------------------
+def _claude_session(sid) -> list:
+    """Keep the same conversation for the whole chat. Returns the command line arguments."""
+    f = _side_file(sid, ".claude")
+    try:
+        saved = _read_text(f)
+        if saved.startswith("new:"):  # the previous resume failed: start this id fresh
+            saved = saved[4:]
+            f.write_text(saved, encoding="utf-8")
+            return ["--session-id", saved]
+        if saved:
+            return ["--resume", saved]
+        new = str(uuid.uuid4())
+        f.write_text(new, encoding="utf-8")
+        return ["--session-id", new]
+    except OSError:
+        return []
+
+
+def _context_tokens(transcript: Path) -> int:
+    """Size of the conversation: input tokens of the latest reply (same measure as the terminal's auto-clear).
+    Only the end of the file is read, where the latest reply is."""
+    last = 0
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 2_000_000))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return 0
+    for line in tail.splitlines():
+        if '"usage"' not in line:
+            continue
+        try:
+            usage = json.loads(line).get("message", {}).get("usage")
+        except (ValueError, AttributeError):
+            continue
+        if usage:
+            last = (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                    + usage.get("cache_creation_input_tokens", 0))
+    return last
+
+
+def _claude_project_dir() -> Path:
+    return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(ROOT))
+
+
+def run_claude(prompt, model, extra=None):
+    """One-shot answer (Big project, Polish, Quick fallback). Returns None when Claude is not installed."""
+    exe = shutil.which("claude")
+    if exe is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, "-p", "--model", model, "--permission-mode", "acceptEdits",
+             "--append-system-prompt", AURA_PERSONA, "--allowedTools"] + ONE_SHOT_ALLOWED + (extra or []),
+            input=prompt, cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=1800, env=_clean_env(), **_hidden())
+        out = (proc.stdout or "").strip()
+        if out:
+            return _friendly(out)
+        err = (proc.stderr or "").strip()
+        if err:
+            _log("claude -p stderr (exit {}): {}".format(proc.returncode, err[-3000:]))
+            return TRY_AGAIN
+        return "No answer."
+    except subprocess.TimeoutExpired:
+        return "Aura took too long and stopped. Try a smaller request."
+    except Exception as exc:
+        _log("run_claude failed: " + repr(exc))
+        return TRY_AGAIN
+
+
+# ---------------------------------------------------------------------------
+# Windows window helpers (own copy of user32 with proper types, so 64-bit handles are safe)
+# ---------------------------------------------------------------------------
+SW_HIDE, SW_SHOW, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE = 0, 5, 6, 3, 9
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x10, 0x20
+GWL_STYLE = -16
+WS_POPUP, WS_CHILD, WS_CLIPCHILDREN = 0x80000000, 0x40000000, 0x02000000
+WS_CAPTION, WS_THICKFRAME, WS_MINIMIZEBOX, WS_MAXIMIZEBOX = 0x00C00000, 0x00040000, 0x00020000, 0x00010000
+VK_LBUTTON = 0x01
+_U32 = None
+
+
+def _user32():
+    global _U32
+    if _U32 is None:
+        from ctypes import wintypes as w
+        u = ctypes.WinDLL("user32")
+        sigs = {
+            "FindWindowExW": (w.HWND, [w.HWND, w.HWND, w.LPCWSTR, w.LPCWSTR]),
+            "GetWindowThreadProcessId": (w.DWORD, [w.HWND, ctypes.POINTER(w.DWORD)]),
+            "IsWindow": (w.BOOL, [w.HWND]),
+            "IsZoomed": (w.BOOL, [w.HWND]),
+            "ShowWindow": (w.BOOL, [w.HWND, ctypes.c_int]),
+            "MoveWindow": (w.BOOL, [w.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, w.BOOL]),
+            "SetWindowPos": (w.BOOL, [w.HWND, w.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, w.UINT]),
+            "GetWindowRect": (w.BOOL, [w.HWND, ctypes.POINTER(w.RECT)]),
+            "GetCursorPos": (w.BOOL, [ctypes.POINTER(w.POINT)]),
+            "GetAsyncKeyState": (w.SHORT, [ctypes.c_int]),
+            "GetWindowLongW": (w.LONG, [w.HWND, ctypes.c_int]),
+            "SetWindowLongW": (w.LONG, [w.HWND, ctypes.c_int, w.LONG]),
+            "SetParent": (w.HWND, [w.HWND, w.HWND]),
+            "LoadImageW": (w.HANDLE, [w.HINSTANCE, w.LPCWSTR, w.UINT, ctypes.c_int, ctypes.c_int, w.UINT]),
+            "SendMessageW": (w.LPARAM, [w.HWND, w.UINT, w.WPARAM, w.LPARAM]),
+            "GetSystemMetrics": (ctypes.c_int, [ctypes.c_int]),
+            "GetDpiForSystem": (w.UINT, []),
+        }
+        for name, (res, args) in sigs.items():
+            fn = getattr(u, name)
+            fn.restype, fn.argtypes = res, args
+        _U32 = u
+    return _U32
+
+
+def _as_long(value: int) -> int:
+    """Window styles are 32-bit: keep the value inside the signed range SetWindowLongW accepts."""
+    value &= 0xFFFFFFFF
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def _find_window(title: str):
+    """Top-level window of THIS app with exactly this title (ignores other programs' windows)."""
+    from ctypes import wintypes as w
+    u = _user32()
+    pid, hwnd = os.getpid(), None
+    for _ in range(64):
+        hwnd = u.FindWindowExW(None, hwnd, None, title)
+        if not hwnd:
+            return None
+        owner = w.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid:
+            return hwnd
+    return None
+
+
+def _wait_for_window(title: str, tries: int, pause: float):
+    for _ in range(tries):
+        hwnd = _find_window(title)
+        if hwnd:
+            return hwnd
+        time.sleep(pause)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Local web servers: website preview + control door for helper programs
+# ---------------------------------------------------------------------------
+class _PreviewHandler(http.server.SimpleHTTPRequestHandler):
+    """Serves one website folder on 127.0.0.1 only, never cached, no console noise."""
+
+    def log_message(self, *args):
+        pass
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+
+def _start_control(api_obj):
+    """Tiny local door so helper programs (like the local assistant) can ask the app to open a web page.
+    Needs a secret token, which is written to logs/aura_ctl.json for them."""
+    token = secrets.token_urlsafe(16)
+    home = Path.home().resolve()
+
+    class _Ctl(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            code = 403
+            try:
+                u = urllib.parse.urlparse(self.path)
+                q = urllib.parse.parse_qs(u.query)
+                url = q.get("url", [""])[0].strip()
+                local = q.get("path", [""])[0].strip()
+                if u.path == "/open" and secrets.compare_digest(q.get("token", [""])[0], token):
+                    if url.lower().startswith(("http://", "https://")):
+                        api_obj._queue_open(url)
+                        code = 200
+                    elif local:
+                        code = 404
+                        lp = Path(local).resolve()
+                        if lp.is_file() and lp.suffix.lower() in (".html", ".htm") and home in lp.parents:
+                            api_obj._queue_open(api_obj._serve_site(str(lp))["url"])
+                            code = 200
+            except Exception as exc:
+                _log("control door: " + repr(exc))
+                code = 404
+            self.send_response(code)
+            self.end_headers()
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Ctl)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    CTL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CTL_FILE.write_text(json.dumps({"port": srv.server_address[1], "token": token}), encoding="utf-8")
+    return srv
+
+
+# ---------------------------------------------------------------------------
+# The API the page talks to
+# ---------------------------------------------------------------------------
+class Api:
+    def __init__(self):
+        # Everything private starts with "_" so the page never sees it.
+        self._chats = {}                     # sid -> running chat process state
+        self._chats_lock = threading.Lock()
+        self._reaper_on = False
+        self._handoff_busy = set()
+        self._handoff_lock = threading.Lock()
+        self._servers = {}                   # website folder -> local preview server
+        self._srv_lock = threading.Lock()
+        self._open_q = []                    # web addresses waiting to be shown in the browser pane
+        self._open_lock = threading.Lock()
+        self._ov_lock = threading.Lock()     # the real browser view over the pane
+        self._ov_win = None
+        self._ov_hwnd = None
+        self._hwnd = None                    # main window handle (cached)
+        self._pty = None                     # hidden terminal mode
+        self._buf = ""
+        self._term_lock = threading.Lock()
+
+    # ---- chats list ----
+    def get_version(self) -> str:
+        try:
+            return _local_version()
+        except Exception:
+            return "0.1.0"
+
+    def list_sessions(self) -> list:
+        try:
+            return chat_store.list_sessions(CHATS_DIR)
+        except Exception as exc:
+            _log("list_sessions failed: " + repr(exc))
+            return []
+
+    def new_session(self) -> str:
+        """A new empty chat. Returns its id, or "" if it could not be created."""
+        try:
+            return chat_store.new_session(CHATS_DIR)
+        except Exception as exc:
+            _log("new_session failed: " + repr(exc))
+            return ""
+
+    def load_session(self, sid) -> dict:
+        try:
+            return chat_store.load_session(CHATS_DIR, sid)
+        except Exception as exc:
+            _log("load_session failed: " + repr(exc))
+            return {"messages": [], "error": True}
+
+    def delete_session(self, sid) -> bool:
+        try:
+            self.chat_stop(sid)
+            ok = chat_store.delete_session(CHATS_DIR, sid)
+            if ok:
+                for ext in (".claude", ".summary", ".site"):
+                    _unlink(_side_file(sid, ext))
+            return ok
+        except Exception as exc:
+            _log("delete_session failed: " + repr(exc))
+            return False
+
+    # ---- window buttons (the page draws its own top strip instead of the native title bar) ----
+    # ---- settings helpers ----
+    def delete_all_sessions(self) -> int:
+        """Delete every chat. Returns how many were removed."""
+        n = 0
+        try:
+            for s in chat_store.list_sessions(CHATS_DIR):
+                if self.delete_session(s.get("id")):
+                    n += 1
+        except Exception as exc:
+            _log("delete_all_sessions failed: " + repr(exc))
+        return n
+
+    def open_chats_folder(self) -> dict:
+        try:
+            CHATS_DIR.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(CHATS_DIR))
+            return {"status": "Opened."}
+        except Exception as exc:
+            _log("open_chats_folder failed: " + repr(exc))
+            return {"status": "Could not open the folder."}
+
+    def export_chat(self, sid) -> dict:
+        """Save one chat as a text file (the user picks where)."""
+        try:
+            import webview
+            data = chat_store.load_session(CHATS_DIR, sid)
+            msgs = data.get("messages") or []
+            if not msgs:
+                return {"status": "This chat is empty."}
+            lines = []
+            for m in msgs:
+                who = "You" if m.get("role") == "user" else "Aura"
+                lines.append(who + ":\n" + mask_names(str(m.get("text", ""))) + "\n")
+            title = re.sub(r'[\\/:*?"<>|]+', "", data.get("title") or "chat").strip()[:40] or "chat"
+            dialog_type = getattr(getattr(webview, "FileDialog", None), "SAVE", None) or webview.SAVE_DIALOG
+            res = webview.windows[0].create_file_dialog(dialog_type, save_filename="Aura - " + title + ".txt")
+            if not res:
+                return {"status": "Cancelled."}
+            path = res if isinstance(res, str) else res[0]
+            Path(path).write_text("\n".join(lines), encoding="utf-8")
+            return {"status": "Chat saved."}
+        except Exception as exc:
+            _log("export_chat failed: " + repr(exc))
+            return {"status": "Could not save the chat."}
+
+    def _main_hwnd(self):
+        u = _user32()
+        if not (self._hwnd and u.IsWindow(self._hwnd)):
+            self._hwnd = _find_window("Aura")
+        return self._hwnd
+
+    def win_drag(self) -> None:
+        """Move the window with the mouse while the left button stays down (called when the top strip is pressed)."""
+        try:
+            from ctypes import wintypes as w
+            u = _user32()
+            h = self._main_hwnd()
+            if not h:
+                return
+            flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+            pt, rc = w.POINT(), w.RECT()
+            u.GetCursorPos(ctypes.byref(pt))
+            if u.IsZoomed(h):  # dragging a maximized window first restores it, under the cursor
+                u.ShowWindow(h, SW_RESTORE)
+                time.sleep(0.05)
+                u.GetWindowRect(h, ctypes.byref(rc))
+                ox, oy = (rc.right - rc.left) // 2, 16
+                u.SetWindowPos(h, None, pt.x - ox, pt.y - oy, 0, 0, flags)
+            else:
+                u.GetWindowRect(h, ctypes.byref(rc))
+                ox, oy = pt.x - rc.left, pt.y - rc.top
+            started = time.time()
+            last = (pt.x, pt.y)
+            while (u.GetAsyncKeyState(VK_LBUTTON) & 0x8000) and time.time() - started < 60:
+                u.GetCursorPos(ctypes.byref(pt))
+                if (pt.x, pt.y) != last:  # only move when the mouse moved
+                    last = (pt.x, pt.y)
+                    u.SetWindowPos(h, None, pt.x - ox, pt.y - oy, 0, 0, flags)
+                time.sleep(0.008)
+        except Exception as exc:
+            _log("win_drag failed: " + repr(exc))
+
+    def win_min(self) -> None:
+        try:
+            h = self._main_hwnd()
+            if h:
+                _user32().ShowWindow(h, SW_MINIMIZE)
+        except Exception as exc:
+            _log("win_min failed: " + repr(exc))
+
+    def win_max(self) -> dict:
+        try:
+            u = _user32()
+            h = self._main_hwnd()
+            if not h:
+                return {"max": False}
+            u.ShowWindow(h, SW_RESTORE if u.IsZoomed(h) else SW_MAXIMIZE)
+            return {"max": bool(u.IsZoomed(h))}
+        except Exception as exc:
+            _log("win_max failed: " + repr(exc))
+            return {"max": False}
+
+    def win_is_max(self) -> dict:
+        """Is the window maximized right now? (keeps the maximize button icon right after a drag)"""
+        try:
+            h = self._main_hwnd()
+            return {"max": bool(h and _user32().IsZoomed(h))}
+        except Exception:
+            return {"max": False}
+
+    def win_close(self) -> None:
+        try:
+            import webview
+            for win in list(webview.windows):
+                win.destroy()
+        except Exception as exc:
+            _log("win_close failed: " + repr(exc))
+
+    # ---- websites Aura builds (shown in the browser pane) ----
+    def _site_roots(self):
+        home = Path.home()
+        return [ROOT / "sites", ROOT / "site", home / "Desktop", home / "Documents", home / "Downloads"]
+
+    def _chat_site(self, sid):
+        """The website this chat is about (the last one shown for it), if it still exists."""
+        if not str(sid).isalnum():
+            return None
+        path = _read_text(_side_file(sid, ".site"))
+        try:
+            return path if path and Path(path).is_file() else None
+        except OSError:
+            return None
+
+    def remember_site(self, sid, path) -> None:
+        """The page tells us which website belongs to which chat, so Polish edits the right one."""
+        try:
+            if str(sid).isalnum() and Path(str(path)).is_file():
+                _side_file(sid, ".site").write_text(str(path), encoding="utf-8")
+        except Exception as exc:
+            _log("remember_site failed: " + repr(exc))
+
+    def site_check(self, since) -> dict:
+        """Did a website file get created or changed since `since` (unix time)? If so, serve it and return its URL."""
+        try:
+            since = float(since)
+            found = [newest_html(self._site_roots(), since, max_depth=3, skip=SITE_SKIP),
+                     newest_html([ROOT], since, max_depth=0)]
+            found = [f for f in found if f]
+            if not found:
+                return {"found": False}
+            path = max(found, key=lambda f: Path(f).stat().st_mtime)
+            return dict(self._serve_site(path), found=True)
+        except Exception as exc:
+            _log("site_check failed: " + repr(exc))
+            return {"found": False}
+
+    def _serve_site(self, path) -> dict:
+        p = Path(path)
+        folder = str(p.parent)
+        with self._srv_lock:
+            srv = self._servers.get(folder)
+            if srv is None:
+                handler = functools.partial(_PreviewHandler, directory=folder)
+                srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                self._servers[folder] = srv
+        url = "http://127.0.0.1:%d/%s" % (srv.server_address[1], urllib.parse.quote(p.name))
+        return {"url": url, "name": p.name, "path": str(p), "mtime": p.stat().st_mtime}
+
+    def open_external(self, path) -> dict:
+        """Open the website file in the normal browser."""
+        try:
+            webbrowser.open(Path(path).as_uri())
+            return {"status": "Opened."}
+        except Exception as exc:
+            _log("open_external failed: " + repr(exc))
+            return {"status": "Could not open the browser."}
+
+    # ---- browser pane ----
+    def normalize_url(self, text) -> str:
+        """Typed text -> a safe web address (or a search)."""
+        try:
+            return normalize_input(text)
+        except Exception as exc:
+            _log("normalize_url failed: " + repr(exc))
+            return ""
+
+    def frame_check(self, url) -> dict:
+        """Does this site allow itself to be shown inside the pane?"""
+        try:
+            import requests
+            u = str(url)
+            host = urllib.parse.urlparse(u).hostname or ""
+            if host in ("127.0.0.1", "localhost"):
+                return {"embeddable": True}
+            r = requests.get(u, stream=True, timeout=6, allow_redirects=True, headers={"User-Agent": BROWSER_UA})
+            try:
+                headers = dict(r.headers)
+            finally:
+                r.close()
+            return {"embeddable": can_embed(headers)}
+        except Exception as exc:
+            _log("frame_check failed: " + repr(exc))
+            return {"embeddable": True}  # cannot tell: just try it
+
+    def open_url(self, url) -> dict:
+        """Open a web address in the normal browser."""
+        try:
+            u = str(url)
+            if not u.lower().startswith(("http://", "https://")):
+                return {"status": "Not a web address."}
+            webbrowser.open(u)
+            return {"status": "Opened."}
+        except Exception as exc:
+            _log("open_url failed: " + repr(exc))
+            return {"status": "Could not open the browser."}
+
+    def open_browser_window(self, url) -> dict:
+        """Open a web address in its own Aura browser window (works with every site)."""
+        try:
+            import webview
+            u = str(url)
+            if not u.lower().startswith(("http://", "https://")):
+                return {"status": "Not a web address."}
+            webview.create_window("Aura Browser", url=u, width=1200, height=800, min_size=(600, 400),
+                                  text_select=True, background_color="#060709")
+            return {"status": "Opened."}
+        except Exception as exc:
+            _log("open_browser_window failed: " + repr(exc))
+            return {"status": "Could not open the window."}
+
+    def ui_log(self, msg) -> None:
+        """The page reports its own errors here so they land in logs/aura_app.log."""
+        _log("ui: " + str(msg)[:600])
+
+    def poll_open(self) -> list:
+        """Web addresses the assistant wants shown in the Aura browser (the page asks regularly)."""
+        with self._open_lock:
+            out, self._open_q = self._open_q, []
+        return out
+
+    def _queue_open(self, url) -> None:
+        with self._open_lock:
+            self._open_q.append(str(url))
+            del self._open_q[:-10]
+
+    # ---- real browser view fastened over the pane (for sites that refuse a normal frame) ----
+    def overlay_open(self, url, x, y, w, h) -> dict:
+        with self._ov_lock:
+            try:
+                return self._overlay_open(str(url), int(x), int(y), int(w), int(h))
+            except Exception as exc:
+                _log("overlay_open failed: " + repr(exc))
+                return {"ok": False}
+
+    def _overlay_open(self, url, x, y, w, h) -> dict:
+        """Show a real browser view inside the Aura window at this spot (pixels inside the window)."""
+        import webview
+        if not url.lower().startswith(("http://", "https://")):
+            return {"ok": False}
+        u = _user32()
+        if self._ov_win is not None and self._ov_hwnd and u.IsWindow(self._ov_hwnd):
+            self._ov_win.load_url(url)
+        else:
+            win = webview.create_window("Aura Page", url=url, width=900, height=600, x=-3000, y=-3000,
+                                        frameless=True, easy_drag=False, text_select=True,
+                                        background_color="#060709", focus=False)
+            hwnd = _wait_for_window("Aura Page", 80, 0.1)
+            main = self._main_hwnd()
+            if not hwnd or not main:
+                _log("overlay: could not find windows (view {}, main {})".format(hwnd, main))
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                self._ov_win = self._ov_hwnd = None
+                return {"ok": False}
+            # Turn it into a borderless child of the main window.
+            style = u.GetWindowLongW(hwnd, GWL_STYLE)
+            style &= ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
+            style |= WS_CHILD | WS_CLIPCHILDREN
+            u.SetWindowLongW(hwnd, GWL_STYLE, _as_long(style))
+            u.SetParent(hwnd, main)
+            self._ov_win, self._ov_hwnd = win, hwnd
+        u.MoveWindow(self._ov_hwnd, x, y, max(w, 1), max(h, 1), True)
+        u.ShowWindow(self._ov_hwnd, SW_SHOW)
+        return {"ok": True}
+
+    def overlay_move(self, x, y, w, h) -> dict:
+        try:
+            hwnd = self._ov_hwnd
+            if hwnd:
+                u = _user32()
+                u.MoveWindow(hwnd, int(x), int(y), max(int(w), 1), max(int(h), 1), True)
+                u.ShowWindow(hwnd, SW_SHOW)
+            return {"ok": bool(hwnd)}
+        except Exception as exc:
+            _log("overlay_move failed: " + repr(exc))
+            return {"ok": False}
+
+    def overlay_hide(self, stop=False) -> dict:
+        try:
+            if self._ov_hwnd:
+                _user32().ShowWindow(self._ov_hwnd, SW_HIDE)
+                if stop and self._ov_win is not None:
+                    self._ov_win.load_url("about:blank")  # silence videos and music
+            return {"ok": True}
+        except Exception as exc:
+            _log("overlay_hide failed: " + repr(exc))
+            return {"ok": False}
+
+    # ---- one-shot modes: Quick, Local, Big project, Polish ----
+    def send_message(self, sid, text, mode="auto", images=None) -> dict:
+        try:
+            text = text or ""
+            images = _valid_pictures(images)
+            context = _history(sid)
+            chat_store.add_message(CHATS_DIR, sid, "user", _user_line(text, images))
+            if context and text.strip() and not images:  # with a picture, earlier answers must not get in the way
+                text = context + "New request from the user: " + text
+            if mode not in MODES:
+                mode = "claude"
+
+            if mode in ("qwen", "auto"):
+                reply, who = self._ask_local(text, images), "Qwen"
+                if mode == "auto" and self._local_failed(reply):
+                    reply, who = self._one_shot(
+                        "Qwen could not do this task, do it yourself and follow CLAUDE.md: " + text, HELPER_MODEL, "Claude")
+            elif mode == "big":
+                reply, who = self._one_shot(
+                    "BIG PROJECT. Follow the CLAUDE.md workflow (specs, tests, runner.py, Qwen for small pieces): " + text,
+                    HELPER_MODEL, "Claude")
+            elif mode == "polish":
+                reply, who = self._polish(sid, text)
+            else:
+                reply, who = self._one_shot(text, AURA_MODEL, "Claude", _claude_session(sid))
+
+            reply = reply or "No answer."
+            chat_store.add_message(CHATS_DIR, sid, "assistant", "[" + who + "] " + reply)
+            return {"reply": reply, "who": who}
+        except Exception as exc:
+            _log("send_message failed: " + repr(exc))
+            return {"reply": INTERNAL_ERROR, "who": "App", "error": True}
+
+    @staticmethod
+    def _one_shot(prompt, model, who, extra=None):
+        reply = run_claude(prompt, model, extra)
+        return (NOT_SET_UP, "App") if reply is None else (reply, who)
+
+    @staticmethod
+    def _local_failed(reply) -> bool:
+        return (not reply or reply.startswith(("Stopped:", "Error", "No answer", "Aura's local helper is not reachable")))
+
+    def _ask_local(self, text, images) -> str:
+        """Run the local assistant (agent.py). Failures come back as text starting with 'Error: '."""
+        img_dir, img_args = None, []
+        try:
+            if images:
+                img_dir = tempfile.mkdtemp(prefix="aura_img_")
+                for path in _save_pictures(images, Path(img_dir)):
+                    img_args += ["--image", path]
+                text = ("Look ONLY at the attached picture(s) and answer about them. Do not reuse any earlier answer or "
+                        "description; describe what this picture itself shows. " + (text.strip() or "Describe this picture."))
+            if len(text) > MAX_ARG_CHARS:
+                return "Error: That message is too long for this mode. Please shorten it, or use Aura mode."
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "agent.py"), text] + img_args,
+                cwd=str(ROOT), env=_clean_env(), capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=900, **_hidden())
+            out = (proc.stdout or "").strip()
+            if not out:
+                err = (proc.stderr or "").strip()
+                if err:
+                    _log("agent.py stderr (exit {}): {}".format(proc.returncode, err[-3000:]))
+                    return "Error: " + _friendly(err[-6000:])
+                return "No answer."
+            out = "\n".join(ln for ln in out.splitlines() if not STEP_LINE.match(ln)).strip() or "Done."
+            return _friendly(out[-6000:])
+        except subprocess.TimeoutExpired:
+            return "Error: Aura took too long. Try a smaller request."
+        except Exception as exc:
+            _log("agent.py failed: " + repr(exc))
+            return "Error: Aura's local helper could not start."
+        finally:
+            if img_dir:
+                shutil.rmtree(img_dir, ignore_errors=True)
+
+    def _polish(self, sid, text):
+        """Polish edits the website of this chat (or else the newest one), even outside the project folder."""
+        extra, site_note = [], ""
+        try:
+            site = self._chat_site(sid) or newest_html(self._site_roots(), time.time() - 7 * 86400,
+                                                       max_depth=3, skip=SITE_SKIP)
+            if site:
+                site_dir = str(Path(site).parent)
+                extra = ["--add-dir", site_dir]
+                site_note = (
+                    " The website to polish (the one from this chat, or else the newest) is in " + site_dir
+                    + " (main file: " + site + "). Start your reply with: Polished <the website's folder name>."
+                    " If the user does not name another project, polish THAT website. You may edit files inside that"
+                    " website folder and nowhere else outside the project folder. Never delete files.")
+        except Exception as exc:
+            _log("polish: could not find the website folder: " + repr(exc))
+        prompt = ("FINAL POLISH, one pass only: " + text + ". Make the project more modern, professional and solid"
+                  " (design/UX, structure, error handling, speed, small bugs). Focused edits only inside this folder,"
+                  " never delete files, confirm nothing broke, reply in 3-5 lines." + site_note)
+        return self._one_shot(prompt, POLISH_MODEL, "Opus", extra)
+
+    # ---- updates ----
+    def check_update(self) -> dict:
+        try:
+            cfg = _update_config()
+            repo = cfg.get("repo", "")
+            if not repo or "OWNER" in repo:
+                return {"status": "Updates are not set up yet.", "newer": False}
+            import requests
+            url = "https://api.github.com/repos/{}/contents/VERSION?ref={}".format(repo, cfg.get("branch", "main"))
+            resp = requests.get(url, headers=_github_headers(cfg.get("token", "")), timeout=15)
+            resp.raise_for_status()
+            remote = resp.text.strip()
+            if updater.is_newer(remote, _local_version()):
+                return {"status": "Update available: " + remote, "newer": True}
+            return {"status": "You are up to date.", "newer": False}
+        except Exception as exc:
+            _log("check_update failed: " + repr(exc))
+            return {"status": "Could not check for updates.", "newer": False}
+
+    def do_update(self) -> dict:
+        try:
+            cfg = _update_config()
+            repo = cfg.get("repo", "")
+            if not repo or "OWNER" in repo:
+                return {"status": "Update failed: updates are not set up."}
+            import requests
+            url = "https://api.github.com/repos/{}/zipball/{}".format(repo, cfg.get("branch", "main"))
+            resp = requests.get(url, headers=_github_headers(cfg.get("token", "")), timeout=60)
+            resp.raise_for_status()
+            files = {}
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                for info in zf.infolist():
+                    parts = info.filename.split("/", 1)
+                    if info.is_dir() or len(parts) < 2 or parts[1] == "update.json":
+                        continue
+                    files[parts[1]] = zf.read(info)
+            written = updater.apply_update(files, ROOT)
+            return {"status": "Updated {} files. Please restart the app.".format(len(written))}
+        except Exception as exc:
+            _log("update failed: " + repr(exc))
+            return {"status": "Update failed. Check your internet connection and try again."}
+
+    # ---- Aura mode: one streaming background process per chat ----
+    def _claude_proc(self, sid):
+        """The chat's running process, started if needed. Returns its state dict, or None."""
+        with self._chats_lock:
+            st = self._chats.get(sid)
+            if st and st["proc"].poll() is None:
+                return st
+            exe = shutil.which("claude")
+            if not exe:
+                _log("claude executable not found on PATH")
+                return None
+            cmd = ([exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                    "--verbose", "--include-partial-messages", "--permission-mode", "auto",
+                    "--model", AURA_MODEL, "--append-system-prompt", AURA_PERSONA, "--allowedTools"]
+                   + AURA_ALLOWED + _claude_session(sid))
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=str(ROOT), env=_clean_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", **_hidden())
+            except OSError as exc:
+                _log("could not start chat process: " + repr(exc))
+                return None
+            st = {"proc": proc, "events": [], "lock": threading.Lock(), "stopped": False, "busy": False,
+                  "last": time.time()}
+            self._chats[sid] = st
+            if not self._reaper_on:
+                self._reaper_on = True
+                threading.Thread(target=self._reap_idle_chats, daemon=True).start()
+        threading.Thread(target=self._read_chat, args=(sid, st), daemon=True).start()
+        return st
+
+    def _read_chat(self, sid, st):
+        """Turn the process output into small events for the page (picked up by chat_poll)."""
+        proc, tr, noise = st["proc"], Translator(), []
+
+        def emit(line):
+            try:
+                events = tr.feed(line)
+            except Exception as exc:
+                _log("chat event error: " + repr(exc))
+                return []
+            if events:
+                try:
+                    kind = tool_kind_from_line(line)
+                except Exception:
+                    kind = None
+                if kind:
+                    for ev in events:
+                        if ev.get("t") == "tool":
+                            ev["kind"] = kind
+                with st["lock"]:
+                    st["events"].extend(json.dumps(ev) for ev in events)
+                st["last"] = time.time()
+            return events
+
+        try:
+            for raw in proc.stdout:
+                line = raw.strip()
+                if not line:
+                    continue
+                if '"type":"result"' in line.replace(" ", ""):
+                    st["busy"] = False
+                    self._save_reply(sid, tr.saved_text())
+                    threading.Thread(target=self._maybe_handoff, args=(sid,), daemon=True).start()
+                if not emit(line) and not line.startswith("{"):
+                    noise.append(line)
+                    del noise[:-40]
+        except Exception as exc:
+            noise.append("reader error: " + repr(exc))
+        st["busy"] = False
+        if any("no conversation found" in n.lower() for n in noise):
+            try:  # the saved conversation is gone; the next message starts a fresh one
+                _side_file(sid, ".claude").write_text("new:" + str(uuid.uuid4()), encoding="utf-8")
+            except OSError:
+                pass
+        if not st["stopped"]:
+            _log("chat process for {} ended (exit {}). Last output:\n{}".format(sid, proc.poll(), "\n".join(noise)))
+        emit(json.dumps({"type": "closed"}))
+
+    @staticmethod
+    def _save_reply(sid, text):
+        if not text:
+            return
+        try:
+            chat_store.add_message(CHATS_DIR, sid, "assistant", "[Claude] " + text)
+        except Exception as exc:
+            _log("could not save reply: " + repr(exc))
+
+    def _reap_idle_chats(self):
+        """Stop background processes of chats nobody used for 20 minutes (they resume on the next message)."""
+        while True:
+            time.sleep(120)
+            try:
+                with self._chats_lock:
+                    items = list(self._chats.items())
+                for sid, st in items:
+                    idle = time.time() - st.get("last", time.time())
+                    if idle > IDLE_STOP_SECONDS and not st.get("busy") and st["proc"].poll() is None:
+                        _log("chat {} idle for 20 minutes: stopping its background process".format(sid))
+                        self.chat_stop(sid)
+            except Exception as exc:
+                _log("idle reaper: " + repr(exc))
+
+    def _maybe_handoff(self, sid):
+        """Like the terminal's auto-clear: when this chat gets big, the local assistant writes a summary
+        and the chat continues in a fresh conversation that starts from that summary."""
+        with self._handoff_lock:
+            if sid in self._handoff_busy:
+                return
+            self._handoff_busy.add(sid)
+        try:
+            limit = int(os.environ.get("AUTOCLEAR_TOKENS", "100000"))
+            f = _side_file(sid, ".claude")
+            saved = _read_text(f)
+            sess = saved[4:] if saved.startswith("new:") else saved
+            if not sess:
+                return
+            transcript = _claude_project_dir() / (sess + ".jsonl")
+            if not transcript.exists():
+                return
+            tokens = _context_tokens(transcript)
+            if tokens < limit:
+                return
+            _log("chat {} is {} tokens: writing the handoff summary".format(sid, tokens))
+            before = transcript.stat().st_mtime
+            r = subprocess.run([sys.executable, str(ROOT / "handoff.py"), "--hook", "--print"],
+                               input=json.dumps({"transcript_path": str(transcript)}), text=True, capture_output=True,
+                               encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=900, env=_clean_env(),
+                               **_hidden())
+            summary = (r.stdout or "").strip()
+            if not summary:
+                _log("handoff gave no summary: " + (r.stderr or "")[-500:])
+                return
+            if transcript.stat().st_mtime != before:  # the chat moved on meanwhile; try again next time
+                return
+            with self._chats_lock:
+                st = self._chats.get(sid)
+            if st and st.get("busy"):  # a new turn started meanwhile; do not cut it off
+                return
+            _side_file(sid, ".summary").write_text(summary, encoding="utf-8")
+            self.chat_stop(sid)
+            f.write_text("new:" + str(uuid.uuid4()), encoding="utf-8")
+            _log("chat {} continues in a fresh conversation from the summary".format(sid))
+        except Exception as exc:
+            _log("handoff failed: " + repr(exc))
+        finally:
+            with self._handoff_lock:
+                self._handoff_busy.discard(sid)
+
+    def _compose_chat_message(self, sid, text, images):
+        """Build the message for the chat process. Returns (content, used_summary)."""
+        context = _history(sid, since_tag="Claude")  # only what happened in the other modes since
+        if context and text.strip() and not images:
+            text = context + "New message from the user: " + text
+        carried = _read_text(_side_file(sid, ".summary"))
+        if images:
+            # Pictures cost many tokens, so the free local assistant can read them too (do.bat --image).
+            _prune_old_pictures()
+            paths = _save_pictures(images, PICS_DIR)
+            text = ("The user attached " + str(len(paths)) + " picture(s); you can see them directly. Qwen can also read"
+                    " them for free if you want a second look or a detailed description: run do.bat"
+                    " \"<your question about it>\" --image <path> (saved at: " + "; ".join(paths) + ").\n\n"
+                    + (text or "What is in the picture?"))
+        if carried:
+            text = ("Summary of this chat so far (Qwen wrote it to save tokens; treat it as your memory):\n" + carried
+                    + "\n\nNow the user says:\n" + text)
+        if not images:
+            return text, bool(carried)
+        blocks = [{"type": "image", "source": {"type": "base64", "media_type": im.get("media_type", "image/png"),
+                                               "data": im["data"]}} for im in images]
+        return blocks + [{"type": "text", "text": text or "What is in this picture?"}], bool(carried)
+
+    def chat_send(self, sid, text, images=None) -> dict:
+        try:
+            text = text or ""
+            images = _valid_pictures(images)
+            content, used_summary = self._compose_chat_message(sid, text, images)
+            line = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
+            for attempt in (1, 2):  # one automatic retry: if the process died, start a fresh one
+                st = self._claude_proc(sid)
+                if st is None:
+                    return {"ok": False, "error": NOT_SET_UP}
+                try:
+                    st["busy"], st["last"] = True, time.time()
+                    st["proc"].stdin.write(line)
+                    st["proc"].stdin.flush()
+                    break
+                except (OSError, ValueError) as exc:
+                    _log("chat_send write failed (attempt {}): {}".format(attempt, repr(exc)))
+                    self.chat_stop(sid)
+            else:
+                return {"ok": False, "error": CANT_START}
+            try:
+                chat_store.add_message(CHATS_DIR, sid, "user", _user_line(text, images))
+            except Exception as exc:
+                _log("could not save user message: " + repr(exc))
+            if used_summary:
+                _unlink(_side_file(sid, ".summary"))
+            return {"ok": True}
+        except Exception as exc:
+            _log("chat_send failed: " + repr(exc))
+            return {"ok": False, "error": CANT_START}
+
+    def chat_poll(self, sid) -> list:
+        try:
+            st = self._chats.get(sid)
+            if not st:
+                return []
+            with st["lock"]:
+                out, st["events"] = st["events"], []
+            return out
+        except Exception:
+            return []
+
+    def chat_stop(self, sid) -> bool:
+        try:
+            with self._chats_lock:
+                st = self._chats.pop(sid, None)
+            if not st:
+                return False
+            st["stopped"] = True
+            _kill_tree(st["proc"])
+            return True
+        except Exception as exc:
+            _log("chat_stop failed: " + repr(exc))
+            return False
+
+    def chat_save(self, sid, text) -> None:
+        """Keep the part of an answer that was shown before the user pressed Stop."""
+        self._save_reply(sid, str(text or ""))
+
+    def _shutdown(self):
+        """The window closed: stop every helper this app started."""
+        with self._chats_lock:
+            sids = list(self._chats)
+        for sid in sids:
+            self.chat_stop(sid)
+        self.term_restart()
+
+    # ---- hidden terminal mode (ConPTY via pywinpty) ----
+    def term_start(self, cols: int = 100, rows: int = 30) -> dict:
+        try:
+            if self._pty is not None and self._pty.isalive():
+                return {"status": "running"}
+            exe = shutil.which("claude")
+            if not exe:
+                return {"status": NOT_SET_UP}
+            from winpty import PtyProcess
+            pty = PtyProcess.spawn([exe], cwd=str(ROOT), dimensions=(int(rows), int(cols)), env=_clean_env())
+            self._pty = pty
+        except Exception as exc:
+            _log("terminal start failed: " + repr(exc))
+            return {"status": "Could not start the terminal."}
+
+        def reader(p):
+            while True:
+                try:
+                    data = p.read(4096)
+                except Exception:
+                    break
+                if not data:
+                    if not p.isalive():
+                        break
+                    time.sleep(0.02)
+                    continue
+                with self._term_lock:
+                    self._buf = (self._buf + data)[-200000:]
+            with self._term_lock:
+                self._buf += "\r\n[Closed. Click Restart.]\r\n"
+
+        threading.Thread(target=reader, args=(pty,), daemon=True).start()
+        return {"status": "started"}
+
+    def term_read(self) -> str:
+        with self._term_lock:
+            out, self._buf = self._buf, ""
+        return out
+
+    def term_write(self, data: str) -> None:
+        try:
+            if self._pty is not None and self._pty.isalive():
+                self._pty.write(data)
+        except Exception as exc:
+            _log("term_write failed: " + repr(exc))
+
+    def term_resize(self, cols: int, rows: int) -> None:
+        try:
+            if self._pty is not None and self._pty.isalive():
+                self._pty.setwinsize(int(rows), int(cols))
+        except Exception:
+            pass
+
+    def term_restart(self) -> dict:
+        if self._pty is not None:
+            try:
+                self._pty.terminate(force=True)
+            except Exception:
+                pass
+        self._pty = None
+        return {"status": "ok"}
+
+    def open_claude(self) -> dict:
+        try:
+            subprocess.Popen(["claude"], cwd=str(ROOT), creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+            return {"status": "Opened."}
+        except Exception as exc:
+            _log("open_claude failed: " + repr(exc))
+            return {"status": NOT_SET_UP}
+
+
+# ---------------------------------------------------------------------------
+# Start-up
+# ---------------------------------------------------------------------------
+def _set_window_icon() -> None:
+    """Give the window and taskbar the Aura icon and drop the native title bar (Windows only)."""
+    try:
+        u = _user32()
+        icon = ROOT / "app" / "aura_icon4.ico"
+        if not icon.exists():
+            icon = ROOT / "app" / "icon.ico"
+        hwnd = _wait_for_window("Aura", 40, 0.25)
+        if not hwnd:
+            return
+        big = u.LoadImageW(None, str(icon), 1, 256, 256, 0x10)    # IMAGE_ICON, LR_LOADFROMFILE
+        small = u.LoadImageW(None, str(icon), 1, 32, 32, 0x10)
+        u.SendMessageW(hwnd, 0x80, 1, big or 0)    # WM_SETICON, ICON_BIG
+        u.SendMessageW(hwnd, 0x80, 0, small or 0)  # WM_SETICON, ICON_SMALL
+        # Drop the caption but keep the resize frame (the page draws its own top strip).
+        style = u.GetWindowLongW(hwnd, GWL_STYLE)
+        u.SetWindowLongW(hwnd, GWL_STYLE, _as_long(style & ~WS_CAPTION))
+        u.SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED)
+        # Windows 11 paints a lighter, see-through strip at the top (the hidden caption bar) and a colored
+        # border: paint both in the app's own dark color (COLORREF 0x00BBGGRR for #060709) and use no backdrop.
+        try:
+            dwm = ctypes.windll.dwmapi
+            for attr, val in ((35, 0x090706),   # DWMWA_CAPTION_COLOR
+                              (34, 0x090706),   # DWMWA_BORDER_COLOR
+                              (38, 1)):         # DWMWA_SYSTEMBACKDROP_TYPE = none
+                dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_int(val)), 4)
+        except Exception as exc:
+            _log("window color failed: " + repr(exc))
+    except Exception as exc:
+        _log("icon failed: " + repr(exc))
+
+
+def _window_geometry():
+    """Window size and position, centered on the screen. Windows is asked directly because the window
+    library reports a wrong screen size on this setup; values are converted to scaled units."""
+    try:
+        u = _user32()
+        scale = max(1.0, (u.GetDpiForSystem() or 96) / 96)
+        lw = u.GetSystemMetrics(0) / scale
+        lh = u.GetSystemMetrics(1) / scale
+        width = max(980, int(lw * 0.68))
+        height = max(640, int(min(lh * 0.74, lh - 80)))
+        x = max(0, int((lw - width) / 2))
+        y = max(0, int((lh - height) / 2) - 20)  # a little higher, leaving room for the taskbar
+        return width, height, x, y
+    except Exception:
+        return 1440, 900, None, None  # None = let the system place it
+
+
+def _keep_links_inside(api_obj) -> None:
+    """Links that ask for a new window (target=_blank, YouTube results...) used to jump to the normal
+    browser. Now: inside the page view they load in that view; in the main window they open in the pane."""
+    try:
+        from webview.platforms import edgechromium
+
+        def on_new_window(self, sender, args):
+            args.set_Handled(True)
+            uri = str(args.get_Uri())
+            if not uri.lower().startswith(("http://", "https://")):
+                return
+            try:
+                if not args.get_IsUserInitiated():
+                    return  # a page opening windows by itself (Bing does) is ignored; only real clicks count
+            except Exception:
+                pass
+            title = getattr(self.pywebview_window, "title", "")
+            if title == "Aura":
+                api_obj._queue_open(uri)  # the page shows it in the browser pane
+            else:
+                self.load_url(uri)         # stay in the same view
+
+        edgechromium.EdgeChrome.on_new_window_request = on_new_window
+    except Exception as exc:
+        _log("keep_links_inside failed: " + repr(exc))
+
+
+def main() -> None:
+    import webview
+
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Aura.App")
+    except Exception:
+        pass
+
+    width, height, x, y = _window_geometry()
+    api_obj = Api()
+    _keep_links_inside(api_obj)
+    try:
+        _start_control(api_obj)
+    except Exception as exc:
+        _log("control server failed: " + repr(exc))
+
+    webview.create_window(
+        "Aura",
+        url=str(ROOT / "app" / ("web_hermes" if os.environ.get("AURA_THEME") == "hermes" else "web") / "index.html"),
+        js_api=api_obj,
+        width=width,
+        height=height,
+        x=x,
+        y=y,
+        min_size=(760, 520),
+        background_color="#060709",
+        text_select=True,
+    )
+    try:
+        webview.start(_set_window_icon)
+    finally:
+        api_obj._shutdown()
+
+
+if __name__ == "__main__":
+    main()
