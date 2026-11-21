@@ -1297,13 +1297,39 @@ def _set_window_icon() -> None:
         icon = ROOT / "app" / "aura_icon4.ico"
         if not icon.exists():
             icon = ROOT / "app" / "icon.ico"
-        hwnd = _wait_for_window("Aura", 40, 0.25)
+        hwnd = _wait_for_window("Aura", 240, 0.25)  # a slow first start can take a while
         if not hwnd:
+            _log("icon: window not found")
             return
-        big = u.LoadImageW(None, str(icon), 1, 256, 256, 0x10)    # IMAGE_ICON, LR_LOADFROMFILE
-        small = u.LoadImageW(None, str(icon), 1, 32, 32, 0x10)
-        u.SendMessageW(hwnd, 0x80, 1, big or 0)    # WM_SETICON, ICON_BIG
-        u.SendMessageW(hwnd, 0x80, 0, small or 0)  # WM_SETICON, ICON_SMALL
+
+        def put_icon() -> None:
+            big = u.LoadImageW(None, str(icon), 1, 256, 256, 0x10)    # IMAGE_ICON, LR_LOADFROMFILE
+            small = u.LoadImageW(None, str(icon), 1, 32, 32, 0x10)
+            if not big or not small:
+                _log("icon: could not load {}".format(icon))
+            u.SendMessageW(hwnd, 0x80, 1, big or 0)    # WM_SETICON, ICON_BIG
+            u.SendMessageW(hwnd, 0x80, 0, small or 0)  # WM_SETICON, ICON_SMALL
+            try:  # also tell the window frame itself (the taskbar button reads this one)
+                import webview
+                from System import Action
+                from System.Drawing import Icon
+                form = webview.windows[0].native
+                ico = Icon(str(icon))
+                form.Invoke(Action(lambda: setattr(form, "Icon", ico)))
+            except Exception as exc:
+                _log("icon (form) failed: " + repr(exc))
+
+        put_icon()
+
+        def again() -> None:  # the window library may paint its own icon a moment later: set ours again
+            for pause in (2, 4, 9):
+                time.sleep(pause)
+                try:
+                    if u.IsWindow(hwnd):
+                        put_icon()
+                except Exception:
+                    return
+        threading.Thread(target=again, daemon=True).start()
         # Drop the caption but keep the resize frame (the page draws its own top strip).
         style = u.GetWindowLongW(hwnd, GWL_STYLE)
         u.SetWindowLongW(hwnd, GWL_STYLE, _as_long(style & ~WS_CAPTION))
