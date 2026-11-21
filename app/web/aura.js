@@ -944,6 +944,7 @@
     });
     pollOpen();
     syncMax();
+    startUpdateChecks(3600); // toast after the glitch splash is gone
     input.focus();
   }
 
@@ -1002,17 +1003,104 @@
   }
   applySettings();
 
+  /* ---------- updates: quiet check at start, badge on Settings, progress overlay, self-restart ---------- */
+  var updAvail = "", updBusy = false, updOv = null;
+  function setUpdateBadge(v) {
+    updAvail = v || "";
+    ["settingsBtn", "railSettings"].forEach(function (id) {
+      var b = $(id); if (!b) return;
+      b.classList.toggle("has-update", !!updAvail);
+      b.setAttribute("aria-label", updAvail ? "Settings (update available)" : "Settings");
+      b.title = updAvail ? "Settings · Update available" : "Settings";
+    });
+  }
+  function updKey(e) {
+    if (!updOv || e.altKey) return;
+    var err = updOv.classList.contains("err");
+    if (err && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); updHide(); return; }
+    if (err && updOv.contains(e.target) && (e.key === "Tab" || e.key === "Enter" || e.key === " ")) return;
+    e.preventDefault(); e.stopPropagation(); /* nothing else while Aura updates */
+  }
+  function updShow() {
+    if (updOv) return updOv;
+    updOv = document.createElement("div"); updOv.id = "updOv";
+    updOv.setAttribute("role", "alertdialog"); updOv.setAttribute("aria-modal", "true");
+    updOv.setAttribute("aria-labelledby", "updTitle"); updOv.setAttribute("aria-describedby", "updStep");
+    updOv.innerHTML = '<div class="upd-card" tabindex="-1"><div class="upd-ring" aria-hidden="true"></div>' +
+      '<h3 id="updTitle">Updating Aura</h3><p id="updStep" aria-live="polite"></p>' +
+      '<div class="upd-bar" aria-hidden="true"><i></i></div>' +
+      '<div class="upd-actions" hidden><button type="button" class="set-btn" id="updClose">Close</button>' +
+      '<button type="button" class="set-btn primary" id="updRetry">Retry</button></div></div>';
+    Array.prototype.forEach.call(document.body.children, function (el) {
+      if (!el.inert) { el.inert = true; el.setAttribute("data-upd-inert", ""); } /* no clicks or focus behind */
+    });
+    document.body.appendChild(updOv);
+    updOv.querySelector("#updRetry").addEventListener("click", runUpdate);
+    updOv.querySelector("#updClose").addEventListener("click", updHide);
+    document.addEventListener("keydown", updKey, true);
+    requestAnimationFrame(function () { if (updOv) { updOv.classList.add("show"); updOv.querySelector(".upd-card").focus(); } });
+    return updOv;
+  }
+  function updHide() {
+    if (!updOv || updBusy) return;
+    document.removeEventListener("keydown", updKey, true);
+    Array.prototype.forEach.call(document.querySelectorAll("[data-upd-inert]"), function (el) { el.inert = false; el.removeAttribute("data-upd-inert"); });
+    updOv.remove(); updOv = null;
+    if (!document.querySelector(".modal-back")) ovResume();
+    var b = document.querySelector("#setUpBtn");
+    if (b) b.focus(); else focusInput();
+  }
+  function updStep(text, failed) {
+    var o = updShow();
+    o.classList.toggle("err", !!failed);
+    o.querySelector("#updTitle").textContent = failed ? "Update did not finish" : "Updating Aura";
+    o.querySelector("#updStep").textContent = text;
+    o.querySelector(".upd-actions").hidden = !failed;
+    if (failed) o.querySelector("#updRetry").focus();
+  }
+  function runUpdate() {
+    if (!api || updBusy) return;
+    if (!updOv && guardBusy()) return; /* never cut off an answer that is still coming in */
+    updBusy = true; ovSuspend();
+    updStep("Downloading the update...");
+    api.update_download().then(function (r) {
+      if (!r || !r.ok) throw r;
+      updStep("Installing...");
+      return api.update_install();
+    }).then(function (r) {
+      if (!r || !r.ok) throw r;
+      updStep("Restarting Aura...");
+      return api.update_restart();
+    }).then(function (r) {
+      if (!r || !r.ok) throw r;
+      /* this window closes in a moment and the new Aura opens by itself; the overlay stays until then */
+    }).catch(function (r) {
+      updBusy = false;
+      updStep((r && r.status) || "The update did not finish. Aura is still running.", true);
+    });
+  }
+  function paintUpdateRow(btn, note) {
+    if (!updAvail) return;
+    note.textContent = "Version " + updAvail + " is ready. Aura restarts by itself afterwards.";
+    btn.textContent = "Update now"; btn.classList.add("primary");
+  }
   function checkForUpdates(btn, note) {
     if (!api || btn.classList.contains("busy")) return;
+    if (updAvail) { runUpdate(); return; }
     btn.classList.add("busy"); btn.setAttribute("aria-busy", "true"); note.textContent = "Checking...";
     api.check_update().then(function (r) {
-      note.textContent = (r && r.status) || "Could not check for updates.";
-      if (r && r.newer) {
-        return askConfirm({ title: "Update available", text: "A newer version of Aura is ready. Update now? You will need to restart the app afterwards.", ok: "Update now", cancel: "Later" })
-          .then(function (yes) { if (yes) return api.do_update().then(function (r2) { note.textContent = (r2 && r2.status) || "Update failed."; }); });
-      }
-    }).catch(function () { note.textContent = "Could not check for updates."; })
+      if (r && r.newer) { setUpdateBadge(r.version || "new"); paintUpdateRow(btn, note); }
+      else note.textContent = (r && r.status) || "Could not check for updates right now.";
+    }).catch(function () { note.textContent = "Could not check for updates right now."; })
       .then(function () { btn.classList.remove("busy"); btn.removeAttribute("aria-busy"); });
+  }
+  function startUpdateChecks(splashMs) {
+    if (api.update_notice) api.update_notice().then(function (v) {
+      if (v) setTimeout(function () { toast("Updated to v" + v); }, splashMs);
+    }).catch(noop);
+    setTimeout(function () { /* quiet check, never installs anything by itself */
+      api.check_update().then(function (r) { if (r && r.newer) setUpdateBadge(r.version || "new"); }).catch(noop);
+    }, 5000);
   }
 
   function openSettings() {
@@ -1049,6 +1137,7 @@
 
     if (api) api.get_version().then(function (v) { q("setVer").textContent = "v" + v; }).catch(noop);
     q("setUpBtn").addEventListener("click", function () { checkForUpdates(q("setUpBtn"), q("setUpNote")); });
+    paintUpdateRow(q("setUpBtn"), q("setUpNote"));
 
     var seg = q("setSize");
     function paintSeg() { Array.prototype.forEach.call(seg.children, function (b) { var on = b.dataset.v === settings.size; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false"); }); }

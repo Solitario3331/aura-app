@@ -52,6 +52,8 @@ DROP_DIR = CHATS_DIR / "_dropped"       # copies of dropped files when the page 
 PICS_DIR = CHATS_DIR / "_pics"          # the app's own copies of sent pictures (kept two days)
 LOG_FILE = ROOT / "logs" / "aura_app.log"
 CTL_FILE = ROOT / "logs" / "aura_ctl.json"
+RESTART_READY = ROOT / "logs" / "aura_restart_ready.txt"   # the new Aura writes this once it has started fine
+RESTART_WAIT_SECONDS = 45               # how long the old Aura waits for the new one before giving up
 
 AURA_MODEL = "claude-haiku-5-5"         # Aura mode (streaming chat)
 HELPER_MODEL = "claude-sonnet-5-5"      # Big project, and Quick mode when the local helper fails
@@ -267,6 +269,46 @@ def _update_config() -> dict:
     except (OSError, ValueError):
         pass
     return cfg
+
+
+def _is_offline_error(exc) -> bool:
+    """True when the internet (or GitHub) could not be reached at all, as opposed to a server error."""
+    try:
+        import requests
+        return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+    except Exception:
+        return False
+
+
+def _wait_for_old_aura(argv) -> bool:
+    """After an update restart: tell the old Aura we started fine, then wait until it has closed, so the
+    window titles, control door file and taskbar entry are ours alone. Returns True if this is such a restart."""
+    pid = 0
+    for a in argv:
+        if a.startswith("--wait-pid="):
+            try:
+                pid = int(a.split("=", 1)[1])
+            except ValueError:
+                pid = 0
+    if "--updated" not in argv:
+        return False
+    try:
+        RESTART_READY.parent.mkdir(parents=True, exist_ok=True)
+        RESTART_READY.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError as exc:
+        _log("restart: could not write ready file: " + repr(exc))
+    if pid and os.name == "nt":
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        h = k32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if h:
+            try:
+                if k32.WaitForSingleObject(ctypes.c_void_p(h), 20000) != 0:
+                    _log("restart: old Aura still running after 20 s, starting anyway")
+            finally:
+                k32.CloseHandle(ctypes.c_void_p(h))
+    _unlink(RESTART_READY)
+    return True
 
 
 def _github_headers(token: str) -> dict:
@@ -503,6 +545,11 @@ class Api:
         self._pty = None                     # hidden terminal mode
         self._buf = ""
         self._term_lock = threading.Lock()
+        self._ctl_srv = None                 # control door server (set in main)
+        self._upd_lock = threading.Lock()    # one update step at a time
+        self._upd_files = None               # downloaded update, waiting to be installed
+        self._restarting = False
+        self._updated_to = ""                # set after an update restart: shown once as a toast
 
     # ---- chats list ----
     def get_version(self) -> str:
@@ -986,18 +1033,24 @@ class Api:
             resp.raise_for_status()
             remote = resp.text.strip()
             if updater.is_newer(remote, _local_version()):
-                return {"status": "Update available: " + remote, "newer": True}
-            return {"status": "You are up to date.", "newer": False}
+                return {"status": "Update available: v" + remote, "newer": True, "state": "available", "version": remote}
+            return {"status": "You are up to date.", "newer": False, "state": "uptodate", "version": _local_version()}
         except Exception as exc:
             _log("check_update failed: " + repr(exc))
-            return {"status": "Could not check for updates.", "newer": False}
+            if _is_offline_error(exc):
+                return {"status": "Could not check (no internet).", "newer": False, "state": "offline"}
+            return {"status": "Could not check for updates right now. Please try again later.", "newer": False,
+                    "state": "error"}
 
-    def do_update(self) -> dict:
+    def update_download(self) -> dict:
+        """Step 1 of an update: fetch the new version (kept in memory until update_install)."""
+        if not self._upd_lock.acquire(blocking=False):
+            return {"ok": False, "status": "An update is already running."}
         try:
             cfg = _update_config()
             repo = cfg.get("repo", "")
             if not repo or "OWNER" in repo:
-                return {"status": "Update failed: updates are not set up."}
+                return {"ok": False, "status": "Updates are not set up on this PC."}
             import requests
             if cfg.get("token"):
                 url = "https://api.github.com/repos/{}/zipball/{}".format(repo, cfg.get("branch", "main"))
@@ -1013,17 +1066,118 @@ class Api:
                             or parts[1].split("/")[0].lower() in ("chats", "logs"):
                         continue  # this PC's own settings and data are never replaced
                     files[parts[1]] = zf.read(info)
+            if "app/app.py" not in files and not getattr(sys, "frozen", False):
+                _log("update: downloaded archive has no app/app.py ({} files)".format(len(files)))
+                return {"ok": False, "status": "The downloaded update looks incomplete. Please try again later."}
+            self._upd_files = files
+            return {"ok": True}
+        except Exception as exc:
+            _log("update download failed: " + repr(exc))
+            if _is_offline_error(exc):
+                return {"ok": False, "status": "Could not download the update (no internet). Check your connection "
+                                              "and press Retry."}
+            return {"ok": False, "status": "Could not download the update. Please press Retry in a moment."}
+        finally:
+            self._upd_lock.release()
+
+    def update_install(self) -> dict:
+        """Step 2: write the downloaded files (chats, logs and this PC's settings are never touched)."""
+        if not self._upd_lock.acquire(blocking=False):
+            return {"ok": False, "status": "An update is already running."}
+        try:
+            files, self._upd_files = self._upd_files, None
+            if not files:
+                return {"ok": False, "status": "Nothing was downloaded yet. Please press Retry."}
             written = updater.apply_update(files, ROOT)
             if "requirements.txt" in written:
                 try:
-                    subprocess.run([CHILD_PY, "-m", "pip", "install", "-q", "--disable-pip-version-check",
-                                    "-r", str(ROOT / "requirements.txt")], cwd=str(ROOT), timeout=300, **_hidden())
+                    res = subprocess.run([CHILD_PY, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                                          "-r", str(ROOT / "requirements.txt")], cwd=str(ROOT), timeout=300,
+                                         capture_output=True, **_hidden())
+                    if res.returncode != 0:
+                        _log("pip after update failed: " + (res.stderr or b"").decode("utf-8", "replace")[-2000:])
+                        return {"ok": False, "status": "The new files are in place, but some parts could not be "
+                                                      "installed. Check your internet and press Retry."}
                 except Exception as exc:
                     _log("pip after update failed: " + repr(exc))
-            return {"status": "Updated {} files. Please restart the app.".format(len(written))}
+                    return {"ok": False, "status": "The new files are in place, but some parts could not be "
+                                                  "installed. Check your internet and press Retry."}
+            _log("update installed: {} files, now v{}".format(len(written), _local_version()))
+            return {"ok": True, "version": _local_version()}
         except Exception as exc:
-            _log("update failed: " + repr(exc))
-            return {"status": "Update failed. Check your internet connection and try again."}
+            _log("update install failed: " + repr(exc))
+            return {"ok": False, "status": "Could not install the update. Aura is still running; press Retry."}
+        finally:
+            self._upd_lock.release()
+
+    def do_update(self) -> dict:
+        """Old one-call update (download + install), kept for older pages."""
+        r = self.update_download()
+        if r.get("ok"):
+            r = self.update_install()
+        return {"status": "Updated. Aura will restart." if r.get("ok") else r.get("status", "Update failed.")}
+
+    def update_restart(self) -> dict:
+        """Step 3: start a fresh Aura and close this one. The new one first tells us it started fine
+        (RESTART_READY), then waits until this process is gone before opening its window. If it does not
+        come up, this Aura keeps running and the page shows the error (no restart loop)."""
+        with self._upd_lock:
+            if self._restarting:
+                return {"ok": True}
+            proc = None
+            try:
+                _unlink(RESTART_READY)
+                if getattr(sys, "frozen", False):
+                    cmd = [sys.executable]
+                else:
+                    cmd = [no_window.gui_python(), str(ROOT / "app" / "app.py")]
+                cmd += ["--updated", "--wait-pid={}".format(os.getpid())]
+                proc = no_window.start_detached(cmd, str(ROOT))
+                deadline = time.time() + RESTART_WAIT_SECONDS
+                while time.time() < deadline:
+                    if _read_text(RESTART_READY):  # (a venv pythonw is a launcher, so its pid is not the app's)
+                        break
+                    if proc.poll() is not None:
+                        raise RuntimeError("new Aura exited early with code {}".format(proc.returncode))
+                    time.sleep(0.2)
+                else:
+                    raise RuntimeError("new Aura did not report back in time")
+            except Exception as exc:
+                _log("restart after update failed: " + repr(exc))
+                if proc is not None and proc.poll() is None:
+                    _kill_tree(proc)
+                _unlink(RESTART_READY)
+                return {"ok": False, "status": "Aura could not restart by itself. It is still running: press Retry, "
+                                              "or close Aura and open it again to finish the update."}
+            self._restarting = True
+        _log("restarting for the update (new pid {})".format(proc.pid))
+        threading.Thread(target=self._exit_for_restart, daemon=True).start()
+        return {"ok": True}
+
+    def _exit_for_restart(self):
+        """Close everything cleanly so the new Aura can take over (it waits for this process to end)."""
+        time.sleep(0.4)  # let the page receive the answer first
+        guard = threading.Timer(8.0, lambda: os._exit(0))  # never hang around if something blocks below
+        guard.daemon = True
+        guard.start()
+        try:
+            self._shutdown()
+        except Exception as exc:
+            _log("shutdown before restart: " + repr(exc))
+        try:
+            import webview
+            for w in list(webview.windows)[::-1]:  # the main window last
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+        except Exception as exc:
+            _log("closing windows before restart: " + repr(exc))
+
+    def update_notice(self) -> str:
+        """The version Aura was just updated to (once, right after the restart), else ''."""
+        v, self._updated_to = self._updated_to, ""
+        return v
 
     # ---- Aura mode: one streaming background process per chat ----
     def _claude_proc(self, sid):
@@ -1268,6 +1422,22 @@ class Api:
         for sid in sids:
             self.chat_stop(sid)
         self.term_restart()
+        with self._srv_lock:  # website previews: free their ports
+            servers, self._servers = list(self._servers.values()), {}
+        srv, self._ctl_srv = self._ctl_srv, None
+        if srv is not None:  # control door: close it and remove its file so no helper knocks on a dead door
+            servers.append(srv)
+            try:
+                if json.loads(_read_text(CTL_FILE) or "{}").get("port") == srv.server_address[1]:
+                    _unlink(CTL_FILE)
+            except Exception:
+                pass
+        for s in servers:
+            try:
+                s.shutdown()
+                s.server_close()
+            except Exception:
+                pass
 
     # ---- hidden terminal mode (ConPTY via pywinpty) ----
     def term_start(self, cols: int = 100, rows: int = 30) -> dict:
@@ -1560,6 +1730,7 @@ def _ensure_shortcut() -> None:
 def main() -> None:
     import webview
 
+    updated = _wait_for_old_aura(sys.argv[1:])  # after an update: let the old window close first
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)  # before any window exists
     except Exception:
@@ -1574,9 +1745,12 @@ def main() -> None:
 
     width, height, x, y = _window_geometry()
     api_obj = Api()
+    if updated:
+        api_obj._updated_to = _local_version()
+        _log("started after update, v" + api_obj._updated_to)
     _keep_links_inside(api_obj)
     try:
-        _start_control(api_obj)
+        api_obj._ctl_srv = _start_control(api_obj)
     except Exception as exc:
         _log("control server failed: " + repr(exc))
 
@@ -1596,6 +1770,8 @@ def main() -> None:
         webview.start(_set_window_icon)
     finally:
         api_obj._shutdown()
+        if api_obj._restarting:  # the new Aura is waiting for this process to end: do not linger
+            os._exit(0)
 
 
 if __name__ == "__main__":

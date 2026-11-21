@@ -4,3 +4,4 @@ pillow
 pywinpty
 pytest
 ruff
+pypdf

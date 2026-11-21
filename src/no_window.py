@@ -28,6 +28,36 @@ def hidden() -> dict:
     return opts
 
 
+DETACHED_PROCESS = 0x00000008
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def start_detached(cmd, cwd):
+    """Start a window program that must outlive this one (Aura restarting itself): own process group,
+    no console, not tied to our job object. Unlike hidden(), its window is NOT forced hidden."""
+    io = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+          "close_fds": True, "cwd": cwd}
+    if os.name != "nt":
+        return subprocess.Popen(cmd, start_new_session=True, **io)
+    base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    try:
+        return subprocess.Popen(cmd, creationflags=base | CREATE_BREAKAWAY_FROM_JOB, **io)
+    except OSError:  # our job object does not allow breakaway: plain detached is still fine
+        return subprocess.Popen(cmd, creationflags=base, **io)
+
+
+def gui_python() -> str:
+    """The window-less pythonw.exe next to the running interpreter (falls back to sys.executable)."""
+    exe = sys.executable or "pythonw"
+    folder, name = os.path.split(exe)
+    if name.lower() == "python.exe":
+        gui = os.path.join(folder, "pythonw.exe")
+        if os.path.exists(gui):
+            return gui
+    return exe
+
+
 def child_python() -> str:
     """The console python.exe next to the running interpreter (falls back to sys.executable)."""
     exe = sys.executable or "python"

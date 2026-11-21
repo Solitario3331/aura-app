@@ -45,7 +45,7 @@ LOG = ROOT / "logs" / "agent.log"
 IN_AURA = bool(os.environ.get("AURA_APP"))
 OLLAMA_URL = _ollama_url()
 NUM_CTX = int(os.environ.get("QWEN_NUM_CTX", "65536"))
-MAX_STEPS = 15
+MAX_STEPS = 30
 
 
 def _model_name() -> str:
@@ -245,6 +245,32 @@ def _delete_to_recycle_bin(path: str) -> str:
     return f"moved to Recycle Bin: {p}" if r.returncode == 0 else f"ERROR: {(r.stderr or '')[-500:]}"
 
 
+def _read_file(path: str, limit: int = 12000) -> str:
+    """Text of a file. Plain text, code, PDF (pypdf) and Word .docx are understood."""
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(str(p))
+        out, size = [], 0
+        for i, page in enumerate(reader.pages, 1):
+            text = (page.extract_text() or "").strip()
+            out.append(f"--- page {i} ---" + chr(10) + text)
+            size += len(text)
+            if size >= limit:
+                out.append(f"(stopped after page {i} of {len(reader.pages)})")
+                break
+        return chr(10).join(out)[:limit]
+    if ext == ".docx":
+        import re
+        import zipfile
+        with zipfile.ZipFile(p) as zf:
+            xml = zf.read("word/document.xml").decode("utf-8", errors="replace")
+        xml = re.sub(r"</w:p>", chr(10), xml)
+        return re.sub(r"<[^>]+>", "", xml)[:limit]
+    return p.read_text(encoding="utf-8", errors="replace")[:limit]
+
+
 def run_tool(name: str, args: dict) -> str:
     try:
         if name == "open_website":
@@ -252,7 +278,7 @@ def run_tool(name: str, args: dict) -> str:
         if name == "run_powershell":
             return _run_powershell(str(args.get("command", "")))
         if name == "read_file":
-            return Path(args["path"]).read_text(encoding="utf-8", errors="replace")[:6000]
+            return _read_file(args["path"])
         if name == "write_file":
             return _write_file(args["path"], str(args.get("content", "")))
         if name == "delete_to_recycle_bin":
@@ -314,6 +340,7 @@ def main(task: str, images: list[str] | None = None) -> None:
     log("THINK: " + ("on" if think else "off"))
     log("BROWSER: " + ("allowed" if BROWSE_OK else "not asked for"))
 
+    last_sig, repeats = "", 0
     for step in range(1, MAX_STEPS + 1):
         msg = _chat(messages, tools, think, vary)
         messages.append(msg)
@@ -331,8 +358,19 @@ def main(task: str, images: list[str] | None = None) -> None:
                 print(f"[{step}] {name}: {json.dumps(args)[:200]}", flush=True)
             out = run_tool(name, args)
             log(f"{name} {json.dumps(args)[:300]} -> {out[:300]}")
+            sig = name + json.dumps(args, sort_keys=True)
+            repeats = repeats + 1 if sig == last_sig else 0
+            last_sig = sig
+            if repeats >= 2:  # the same call again and again: push it to change its approach
+                out += " (You already tried this exact step. Try something different or explain what blocks you.)"
             messages.append({"role": "tool", "tool_name": name, "content": out})
-    print("Stopped: too many steps. See logs/agent.log.")
+    # Out of steps: instead of failing, ask for a plain summary of what got done and what is left.
+    messages.append({"role": "user", "content": "You are out of steps. Reply in 2-3 plain sentences: what you finished and what is left."})
+    try:
+        final = (_chat(messages, [], False, False).get("content") or "").strip()
+    except SystemExit:
+        final = ""
+    print(final or "I ran out of steps before finishing. Try asking for a smaller piece of the task.")
 
 
 if __name__ == "__main__":

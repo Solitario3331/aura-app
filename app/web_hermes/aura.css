@@ -562,3 +562,37 @@ body.calm.busy #topstrip::after { background-size: 100% 100%; opacity: .5; }
 #thumbs .th.doc { display: flex; align-items: center; max-width: 220px; height: 34px; padding: 0 12px; border: 1px solid var(--line);
   border-radius: 8px; background: var(--surface, var(--side, transparent)); color: var(--text); font-size: 12px; }
 #thumbs .th.doc span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- updates: badge on Settings, progress overlay ---------- */
+#settingsBtn { position: relative; }
+.rail-btn.has-update::after, #settingsBtn.has-update::after { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--side, var(--bg)); }
+.set-btn.primary { color: var(--on-acc); background: var(--acc); border-color: var(--acc); }
+.set-btn.primary:hover { background: var(--acc-hover); border-color: var(--acc-hover); }
+#updOv { position: fixed; inset: 0; z-index: 9600; display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: rgba(8,9,12,.55); backdrop-filter: blur(3px); opacity: 0; transition: opacity .2s ease; cursor: progress; }
+#updOv.show { opacity: 1; }
+#updOv.err { cursor: default; }
+.upd-card { width: 100%; max-width: 340px; padding: 28px 24px 22px; text-align: center; background: var(--overlay);
+  border-radius: var(--r3); box-shadow: var(--shadow); outline: none; transform: translateY(4px); transition: transform .2s ease; }
+#updOv.show .upd-card { transform: none; }
+.upd-ring { width: 36px; height: 36px; margin: 0 auto 16px; border: 3px solid var(--acc-soft); border-top-color: var(--acc);
+  border-radius: 50%; animation: upd-spin .8s linear infinite; }
+@keyframes upd-spin { to { transform: rotate(360deg); } }
+#updTitle { font-size: 15px; font-weight: 600; color: var(--hi); margin: 0 0 6px; }
+#updStep { font-size: 13.5px; line-height: 1.55; color: var(--mute); margin: 0 0 18px; min-height: 1.55em; }
+.upd-bar { position: relative; height: 4px; border-radius: 4px; background: var(--acc-soft); overflow: hidden; }
+.upd-bar i { position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 4px; background: var(--acc);
+  animation: upd-slide 1.4s ease-in-out infinite; }
+@keyframes upd-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.upd-actions { display: flex; justify-content: center; gap: 8px; margin-top: 4px; }
+.upd-actions[hidden] { display: none; }
+#updOv.err .upd-ring, #updOv.err .upd-bar { display: none; }
+#updOv.err #updTitle { color: var(--danger); }
+/* calm / reduced motion: still shapes, no spin or slide */
+body.calm .upd-ring { border-color: var(--acc); opacity: .6; }
+body.calm .upd-bar i { width: 100%; opacity: .5; }
+@media (prefers-reduced-motion: reduce) {
+  .upd-ring { border-color: var(--acc); opacity: .6; }
+  .upd-bar i { width: 100%; opacity: .5; }
+}
