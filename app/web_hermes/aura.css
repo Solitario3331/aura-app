@@ -557,3 +557,8 @@ body.calm.busy #topstrip::after { background-size: 100% 100%; opacity: .5; }
 .keys kbd { justify-self: start; }
 .set-about { padding: 4px 0 8px; font-size: 13px; line-height: 1.6; color: var(--mute); }
 .set-foot { display: flex; justify-content: flex-end; padding: 12px 22px 0; border-top: 1px solid var(--line); }
+
+/* attached (non-picture) files */
+#thumbs .th.doc { display: flex; align-items: center; max-width: 220px; height: 34px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface, var(--side, transparent)); color: var(--text); font-size: 12px; }
+#thumbs .th.doc span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

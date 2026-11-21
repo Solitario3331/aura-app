@@ -14,8 +14,20 @@ from pathlib import Path
 
 import requests
 
+def _ollama_url() -> str:
+    try:
+        f = Path(__file__).parent / "ollama_url.txt"
+        if f.exists():
+            u = f.read_text(encoding="utf-8-sig").strip()
+            if u.lower().startswith(("http://", "https://")):
+                return u
+    except OSError:
+        pass
+    return os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+
 # ---- CONFIG: edit these two lines ------------------------------------------
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = _ollama_url()
 QWEN_MODEL = (os.environ.get("QWEN_MODEL") or (Path(__file__).parent / "model.txt").read_text(encoding="utf-8").strip())
 # -----------------------------------------------------------------------------
 SUMMARY_MODEL = (os.environ.get("SUMMARY_MODEL") or (Path(__file__).parent / "model.txt").read_text(encoding="utf-8").strip())  # summarizes when context fills up

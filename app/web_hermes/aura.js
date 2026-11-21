@@ -489,7 +489,7 @@
   }
 
   /* ---------- pictures: attach, paste, drag and drop ---------- */
-  var pics = [], MAX_PIC = 8 * 1024 * 1024;
+  var pics = [], docs = [], MAX_PIC = 8 * 1024 * 1024, MAX_DOC = 25 * 1024 * 1024;
   function focusInput() { input.focus(); }
   function focusInputSoon() { setTimeout(focusInput, 0); setTimeout(focusInput, 150); }
   function picUrl(p) { return "data:" + p.media_type + ";base64," + p.data; }
@@ -504,10 +504,34 @@
       x.addEventListener("click", function () { pics.splice(i, 1); renderThumbs(); focusInput(); });
       d.appendChild(im); d.appendChild(x); el.appendChild(d);
     });
+    docs.forEach(function (f, i) {
+      var d = document.createElement("div"); d.className = "th doc";
+      var n = document.createElement("span"); n.textContent = f.name; n.title = f.path;
+      var x = document.createElement("button"); x.type = "button"; x.textContent = "\u00d7";
+      x.title = "Remove file"; x.setAttribute("aria-label", "Remove file " + f.name);
+      x.addEventListener("click", function () { docs.splice(i, 1); renderThumbs(); focusInput(); });
+      d.appendChild(n); d.appendChild(x); el.appendChild(d);
+    });
+  }
+  /* Any other file (text, code, PDF, zip...): remember where it is; the assistant reads it from that path. */
+  function addDoc(f) {
+    if (f.size > MAX_DOC) { toast("That file is too big (max 25 MB)."); return; }
+    function keep(p) { docs.push({ name: f.name, path: p }); renderThumbs(); focusInput(); }
+    if (f.pywebviewFullPath) { keep(f.pywebviewFullPath); return; }
+    if (!api) { toast("One moment, still loading."); return; }
+    var r = new FileReader();
+    r.onload = function () {
+      var s = String(r.result);
+      api.save_dropped(f.name, s.slice(s.indexOf(",") + 1)).then(function (res) {
+        if (res && res.path) keep(res.path); else toast("Could not add that file.");
+      }).catch(function () { toast("Could not add that file."); });
+    };
+    r.onerror = function () { toast("Could not read that file."); };
+    r.readAsDataURL(f);
   }
   function addFiles(files) {
     Array.prototype.forEach.call(files, function (f) {
-      if (!f.type || f.type.indexOf("image/") !== 0) { toast("Only pictures can be added."); return; }
+      if (!f.type || f.type.indexOf("image/") !== 0) { addDoc(f); return; }
       if (f.size > MAX_PIC) { toast("That picture is too big (max 8 MB)."); return; }
       var r = new FileReader();
       r.onload = function () {
@@ -627,14 +651,18 @@
 
   function send() {
     var text = input.value.trim();
-    if ((!text && !pics.length) || busy) return;
+    if ((!text && !pics.length && !docs.length) || busy) return;
     if (!api || !currentId) { toast("One moment, the chat is still loading."); return; }
-    var images = pics.slice();
+    var images = pics.slice(), files = docs.slice(), shown = text;
     if (images.length && (mode === "big" || mode === "polish")) { toast("Pictures work in Aura, Quick and Local modes."); return; }
-    pics = []; renderThumbs();
+    pics = []; docs = []; renderThumbs();
     input.value = "";
     input.dispatchEvent(new Event("input")); // re-sizes the box and resets the send button colour
-    var ub = addBubble("user", text);
+    if (files.length) {
+      shown = (shown + "\nAttached: " + files.map(function (f) { return f.name; }).join(", ")).trim();
+      text = (text + "\n\n[Attached files. Read them from these paths:\n" + files.map(function (f) { return f.path; }).join("\n") + "]").trim();
+    }
+    var ub = addBubble("user", shown);
     images.forEach(function (p) {
       var im = document.createElement("img"); im.src = picUrl(p); im.alt = "Sent picture";
       ub.insertBefore(im, ub.firstChild);

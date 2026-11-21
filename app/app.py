@@ -47,6 +47,7 @@ from url_input import normalize_input
 # Settings
 # ---------------------------------------------------------------------------
 CHATS_DIR = ROOT / "chats"
+DROP_DIR = CHATS_DIR / "_dropped"       # copies of dropped files when the page cannot tell their real location
 PICS_DIR = CHATS_DIR / "_pics"          # the app's own copies of sent pictures (kept two days)
 LOG_FILE = ROOT / "logs" / "aura_app.log"
 CTL_FILE = ROOT / "logs" / "aura_ctl.json"
@@ -522,6 +523,21 @@ class Api:
         except Exception as exc:
             _log("delete_all_sessions failed: " + repr(exc))
         return n
+
+    def save_dropped(self, name, data) -> dict:
+        """Keep a copy of a dropped file so the assistant can read it. Returns its path."""
+        try:
+            safe = re.sub(r"[^\w.\- ]", "_", Path(str(name)).name)[:80] or "file"
+            raw = base64.b64decode(data)
+            if len(raw) > 25 * 1024 * 1024:
+                return {"path": ""}
+            DROP_DIR.mkdir(parents=True, exist_ok=True)
+            out = DROP_DIR / (uuid.uuid4().hex[:8] + "_" + safe)
+            out.write_bytes(raw)
+            return {"path": str(out)}
+        except Exception as exc:
+            _log("save_dropped failed: " + repr(exc))
+            return {"path": ""}
 
     def open_chats_folder(self) -> dict:
         try:
@@ -1350,8 +1366,38 @@ def _keep_links_inside(api_obj) -> None:
         _log("keep_links_inside failed: " + repr(exc))
 
 
+def _read_ollama_url() -> None:
+    """A PC that uses another PC's graphics card keeps the address in ollama_url.txt."""
+    try:
+        f = ROOT / "ollama_url.txt"
+        if f.exists():
+            url = f.read_text(encoding="utf-8-sig").strip()
+            if url.lower().startswith(("http://", "https://")):
+                os.environ["OLLAMA_URL"] = url
+    except Exception as exc:
+        _log("ollama_url.txt failed: " + repr(exc))
+
+
+def _ensure_shortcut() -> None:
+    """Put an Aura icon on the desktop if there is none (installed copies only: they have aura.bat)."""
+    try:
+        bat = ROOT / "aura.bat"
+        if not bat.exists():
+            return
+        ps = ("$d=[Environment]::GetFolderPath('Desktop');$l=Join-Path $d 'Aura.lnk';"
+              "if(-not (Test-Path $l)){$s=(New-Object -ComObject WScript.Shell).CreateShortcut($l);"
+              "$s.TargetPath='%s';$s.WorkingDirectory='%s';$s.IconLocation='%s';$s.WindowStyle=7;$s.Save()}"
+              % (bat, ROOT, ROOT / "app" / "aura_icon4.ico"))
+        subprocess.Popen(["powershell", "-NoProfile", "-Command", ps], **_hidden())
+    except Exception as exc:
+        _log("shortcut failed: " + repr(exc))
+
+
 def main() -> None:
     import webview
+
+    _read_ollama_url()
+    _ensure_shortcut()
 
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Aura.App")

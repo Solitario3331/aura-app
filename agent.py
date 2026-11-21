@@ -27,11 +27,23 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+def _ollama_url() -> str:
+    try:
+        f = Path(__file__).parent / "ollama_url.txt"
+        if f.exists():
+            u = f.read_text(encoding="utf-8-sig").strip()
+            if u.lower().startswith(("http://", "https://")):
+                return u
+    except OSError:
+        pass
+    return os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+
 ROOT = Path(__file__).parent
 HOME = Path.home()
 LOG = ROOT / "logs" / "agent.log"
 IN_AURA = bool(os.environ.get("AURA_APP"))
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = _ollama_url()
 NUM_CTX = int(os.environ.get("QWEN_NUM_CTX", "65536"))
 MAX_STEPS = 15
 

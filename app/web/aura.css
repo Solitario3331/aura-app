@@ -510,3 +510,8 @@ body.calm #preview.loading .pv-progress::before { transform: none; width: 100%; 
 .keys kbd { font-family: var(--mono); font-size: 11px; color: var(--hi); padding: 1px 6px; border: 1px solid var(--line2); border-radius: var(--r); justify-self: start; }
 .set-about { padding: 4px 0 10px; font-size: 13px; line-height: 1.6; color: var(--mute); }
 .set-foot { display: flex; justify-content: flex-end; padding: 14px 22px 0; border-top: 1px solid var(--line); }
+
+/* attached (non-picture) files */
+#thumbs .th.doc { display: flex; align-items: center; max-width: 220px; height: 34px; padding: 0 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface, var(--side, transparent)); color: var(--text); font-size: 12px; }
+#thumbs .th.doc span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
