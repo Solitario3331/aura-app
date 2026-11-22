@@ -949,7 +949,7 @@
     btn.addEventListener("click", function () {
       open = !open; panel.hidden = !open; root.classList.toggle("open", open);
       btn.setAttribute("aria-expanded", open ? "true" : "false");
-      if (open) toBottom();
+      if (open) { toBottom(); try { root.scrollIntoView({ block: "nearest" }); } catch (x) { /* ignore */ } }
     });
     copy.addEventListener("click", function () {
       var text = rows.map(function (r) { return r.n + ". " + r.text + (r.detail ? "\n" + r.detail : "") + (r.out ? "\n" + r.out : ""); }).join("\n\n");

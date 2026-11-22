@@ -171,7 +171,7 @@ kbd { font-family: var(--mono); font-size: 10.5px; line-height: 1; color: var(--
   background: linear-gradient(90deg, transparent, var(--acc), transparent) no-repeat; background-size: 30% 100%; transition: opacity .3s ease; }
 body.busy #topstrip::after { opacity: .9; animation: hairBg 1.6s ease-in-out infinite; }
 @keyframes hairBg { 0% { background-position: -40% 0; } 100% { background-position: 140% 0; } }
-@media (min-width: 1101px) { body:has(#preview.open) #topstrip { padding-right: 8px; } }
+@media (min-width: 861px) { body:has(#preview.open) #topstrip { padding-right: 8px; } }
 
 #winctl { position: fixed; top: 0; right: 0; z-index: 8500; display: flex; height: var(--strip); }
 #winctl button { width: 37px; height: var(--strip); display: grid; place-items: center; border-radius: 0; color: var(--dim); }
@@ -778,3 +778,17 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
   border: 1px solid var(--line2); border-right: 0; border-radius: var(--r2) 0 0 var(--r2); }
 #pvTab:hover { color: var(--hi); background: var(--raised); }
 #pvTab[hidden] { display: none !important; }
+
+/* no edge tab: the preview opens from the icon at the top right, like the browser did */
+#pvTab, #pvTab[hidden] { display: none !important; }
+
+/* the chat always keeps a usable width next to the pane */
+#main { min-width: 360px; }
+@media (min-width: 861px) {
+  #preview.open { position: static; box-shadow: none; z-index: auto; flex: 0 0 auto; width: clamp(320px, 40vw, 700px); min-width: 300px;
+    max-width: calc(100vw - var(--sidebar) - var(--rail) - 400px); }
+}
+
+/* a narrow pane keeps the address bar usable: drop the less-used buttons */
+#preview { container-type: inline-size; }
+@container (max-width: 560px) { #pvHome, #pvWin, #pvOpen { display: none; } .ps-auto span { display: none; } }

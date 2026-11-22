@@ -780,3 +780,38 @@ body.calm .working::after, body.calm .progress.live::after { animation: none; }
 #pvTab::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-bottom: 10px; background: var(--acc); }
 #pvTab:hover { color: var(--hi); border-color: var(--acc); box-shadow: 0 0 14px var(--acc-glow); }
 #pvTab[hidden] { display: none !important; }
+
+/* no edge tab: the preview opens from the icon at the top right, like the browser did */
+#pvTab, #pvTab[hidden] { display: none !important; }
+
+/* the chat always keeps a usable width next to the pane */
+#main { min-width: 360px; }
+@media (min-width: 861px) {
+  #preview.open { position: static; box-shadow: none; z-index: auto; flex: 0 0 auto; width: clamp(320px, 42vw, 720px); min-width: 300px;
+    max-width: calc(100vw - var(--sidebar) - 400px); }
+}
+
+/* thinking / working: one quiet line, no box */
+.working, .progress.live { padding: 6px 0; background: var(--bg); border: 0; box-shadow: 0 -14px 14px -6px var(--bg); overflow: visible; }
+.working::before, .working::after, .progress.live::before, .progress.live::after { display: none; }
+.working { gap: 10px; }
+.st-verb, .pg-text { font-family: var(--sans); font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--mute); }
+.st-meta, .pg-time { margin-left: 2px; font-family: var(--mono); font-size: 11px; letter-spacing: .02em; text-transform: none; color: var(--dim); }
+.st-glyph::before, .pg-glyph::before { inset: 3px; border: 0; background: var(--acc-text); animation: dotPulse 1.5s ease-in-out infinite; }
+.progress.done .pg-glyph::before { background: none; }
+@keyframes dotPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .3; transform: scale(.7); } }
+body.calm .st-glyph::before, body.calm .pg-glyph::before { animation: none; }
+.dt-btn { font-family: var(--sans); font-size: 12px; letter-spacing: 0; text-transform: none; }
+.dt-root { margin-top: 2px; }
+
+/* a narrow pane keeps the address bar usable: drop the less-used buttons */
+#preview { container-type: inline-size; }
+@container (max-width: 560px) { #pvHome, #pvWin, #pvOpen { display: none; } .ps-auto span { display: none; } }
+
+/* a narrow chat column (preview open): the mode row wraps instead of hiding behind the pane */
+.mode-row { flex-wrap: wrap; row-gap: 6px; }
+#main { container-type: inline-size; }
+@container (max-width: 520px) { .mode-row > .label { display: none; } .pill { padding-left: 9px; padding-right: 9px; letter-spacing: .08em; } #thinkBtn { margin-left: 0; } }
+
+/* the thinking line is a plain line at the end of the chat (never covers a message) */
+.working, .progress.live { position: static; box-shadow: none; }
