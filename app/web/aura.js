@@ -164,6 +164,70 @@
     el.appendChild(out); // one DOM update per render (cheap while streaming)
   }
 
+
+  /* ---------- message actions: copy, reply (quote), edit (your messages), try again (last answer) ---------- */
+  var editing = false;
+  var ICO = {
+    copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"/></svg>',
+    ok: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    reply: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6L4 12l6 6"/><path d="M4 12h9a7 7 0 0 1 7 7"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20l1-4L16 5a2 2 0 0 1 3 3L8 19z"/><path d="M14 7l3 3"/></svg>',
+    redo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14-4L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14 4l2-2"/><path d="M20 20v-5h-5"/></svg>'
+  };
+  function actBtn(cls, label, svg, fn) {
+    var x = document.createElement("button");
+    x.type = "button"; x.className = "act " + cls; x.title = label; x.setAttribute("aria-label", label);
+    x.innerHTML = svg; x.addEventListener("click", fn);
+    return x;
+  }
+  function rawOf(b) { return (b._raw != null ? b._raw : b.innerText) || ""; }
+  function putInInput(text) {
+    input.value = text; input.dispatchEvent(new Event("input")); autoGrow(); focusInput();
+    try { input.setSelectionRange(text.length, text.length); } catch (x) { /* ignore */ }
+  }
+  function quoteReply(b) {
+    var t = rawOf(b).replace(/\s+/g, " ").trim();
+    if (!t) return;
+    if (t.length > 160) t = t.slice(0, 157) + "...";
+    putInInput("Re: “" + t + "”\n");
+  }
+  function editMessage(b) {
+    if (busy) { toast("Wait for Aura to finish first, or press Stop."); return; }
+    var t = rawOf(b).replace(/^\(edited\) /, "").replace(/\nAttached: [^\n]*$/, "").trim();
+    if (!t) return;
+    editing = true; putInInput(t);
+  }
+  function tryAgain() {
+    if (busy) { toast("Wait for Aura to finish first, or press Stop."); return; }
+    if (pics.length || docs.length) { toast("Send or remove your attachment first."); return; }
+    var draft = input.value;
+    input.value = "Please try again with a different answer.";
+    send();
+    input.value = draft; autoGrow();
+  }
+  function extraActions(acts, b, role) {
+    acts.appendChild(actBtn("reply", "Reply to this message", ICO.reply, function () { quoteReply(b); }));
+    if (role === "user") acts.appendChild(actBtn("edit", "Edit and send again", ICO.edit, function () { editMessage(b); }));
+    else acts.appendChild(actBtn("regen", "Try again (another answer)", ICO.redo, tryAgain));
+  }
+  function ownCopy(b) {
+    var btn = actBtn("copy", "Copy message", ICO.copy, function () {
+      copyText(rawOf(b)).then(function () {
+        btn.innerHTML = ICO.ok; btn.classList.add("done");
+        setTimeout(function () { btn.innerHTML = ICO.copy; btn.classList.remove("done"); }, 1500);
+      });
+    });
+    return btn;
+  }
+  /* "Try again" only shows on the very last message, and only when that is an answer. */
+  function markLastReply() {
+    var all = messagesEl.querySelectorAll(".msg"), last = all.length ? all[all.length - 1] : null;
+    Array.prototype.forEach.call(messagesEl.querySelectorAll(".msg.last-reply"), function (m) { if (m !== last) m.classList.remove("last-reply"); });
+    if (last && last.classList.contains("assistant") && last.querySelector(".act.regen")) last.classList.add("last-reply");
+  }
+  if (window.MutationObserver) new MutationObserver(markLastReply).observe(messagesEl, { childList: true });
+  input.addEventListener("input", function () { if (!input.value) editing = false; });
+
   /* ---------- messages ---------- */
   function addBubble(role, text, kind) {
     var wrap = document.createElement("div");
@@ -178,6 +242,11 @@
     b.className = "bubble" + (kind ? " " + kind : "");
     if (role === "assistant" && !kind) renderRich(b, text); else b.textContent = text;
     wrap.appendChild(b);
+    if (!kind) {
+      var acts = document.createElement("div"); acts.className = "msg-actions";
+      acts.appendChild(ownCopy(b)); extraActions(acts, b, role);
+      wrap.appendChild(acts);
+    }
     messagesEl.appendChild(wrap);
     scrollDown(role === "user");
     return b;
@@ -671,6 +740,7 @@
     if ((!text && !pics.length && !docs.length) || busy) return;
     if (!api || !currentId) { toast("One moment, the chat is still loading."); return; }
     var images = pics.slice(), files = docs.slice(), shown = text;
+    if (editing) { editing = false; if (text) { text = "(edited) " + text; shown = text; } }
     if (images.length && (mode === "big" || mode === "polish")) { toast("Pictures work in Aura, Quick and Local modes."); return; }
     pics = []; docs = []; renderThumbs();
     input.value = "";

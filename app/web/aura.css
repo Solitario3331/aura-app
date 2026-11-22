@@ -617,3 +617,19 @@ body.calm .upd-bar i { width: 100%; opacity: .55; box-shadow: none; }
 #updPop .up-later:hover { color: var(--hi, #fff); }
 #updPop button:focus-visible { outline: 2px solid var(--focus, #7b8cff); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { #updPop { transition: none; } }
+
+.msg { position: relative; }
+.msg-actions { position: absolute; display: flex; gap: 2px; opacity: 0; transition: opacity .15s; z-index: 2; }
+.msg.assistant .msg-actions { top: -8px; right: 0; }
+.msg.user .msg-actions { right: calc(100% + 4px); bottom: 4px; }
+.msg:hover .msg-actions, .msg-actions:focus-within { opacity: 1; }
+.msg:has(> .bubble:empty) .msg-actions { display: none; }
+.msg-actions button { height: 24px; min-width: 24px; padding: 0 6px; display: inline-flex; align-items: center; justify-content: center; color: var(--dim); background: transparent; border: 0; cursor: pointer; }
+.msg-actions button:hover { color: var(--hi); background: var(--acc-soft, rgba(255,255,255,.08)); }
+.msg-actions button:focus-visible { outline: 2px solid var(--focus, #7b8cff); outline-offset: 1px; }
+.msg-actions svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.msg-actions .done { color: var(--ok, #4ade80); }
+
+/* message actions: reply / edit / try again */
+.msg-actions .regen { display: none; }
+.msg.last-reply .msg-actions .regen { display: inline-flex; }

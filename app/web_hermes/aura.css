@@ -663,3 +663,7 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
 #updPop .up-later:hover { color: var(--hi, #fff); }
 #updPop button:focus-visible { outline: 2px solid var(--focus, #7b8cff); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { #updPop { transition: none; } }
+
+/* message actions: reply / edit / try again */
+.msg-actions .regen { display: none; }
+.msg.last-reply .msg-actions .regen { display: inline-flex; }
