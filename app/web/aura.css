@@ -889,3 +889,6 @@ body.calm #messages.intro:empty::before, body.calm #messages.intro:empty::after 
 /* a new chat: greeting and idea buttons ease in after the AURA word */
 #messages.intro ~ #composerWrap #startGreet, #messages.intro ~ #composerWrap #startChips { animation: rise .6s .15s var(--ease) both; }
 body.calm #messages.intro ~ #composerWrap #startGreet, body.calm #messages.intro ~ #composerWrap #startChips { animation: none; }
+
+/* the Details block under a finished answer is a normal block: it must not stretch to a full screen (that left a big gap) */
+#messages > .dt-root { flex: 0 0 auto; align-self: stretch; margin-top: 0; }

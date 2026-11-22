@@ -839,3 +839,6 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
   color: var(--mute); font-size: 13px; font-weight: 500; }
 .start-chip:hover { color: var(--hi); background: var(--raised); border-color: var(--line3); }
 .start-chip:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+
+/* the Details block under a finished answer is a normal block: it must not stretch to a full screen (that left a big gap) */
+#messages > .dt-root { flex: 0 0 auto; align-self: stretch; margin-top: 0; }
