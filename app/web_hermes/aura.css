@@ -481,7 +481,7 @@ body.can-stop #sendBtn { display: none; }
 .pv-card button { height: 32px; padding: 0 14px; margin-top: 4px; border-radius: var(--r2); border: 1px solid var(--line2); background: var(--panel); color: var(--hi); font-size: 13px; font-weight: 500; box-shadow: var(--shadow-sm); }
 .pv-card button:hover { background: var(--raised); border-color: var(--line3); }
 
-#pvTab { display: none !important; }
+/* (the PREVIEW tab is styled at the end of this file) */
 
 /* =====================================================================
    Toast + dialogs (the only places with real depth)
@@ -733,3 +733,48 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
 .pv-body { justify-content: center; }
 #preview.is-site[data-dev="phone"] #pvFrame { flex: none; width: 390px; max-width: 100%; box-shadow: 0 0 0 1px var(--line2, rgba(255,255,255,.14)); }
 #preview.is-site[data-dev="tablet"] #pvFrame { flex: none; width: 768px; max-width: 100%; box-shadow: 0 0 0 1px var(--line2, rgba(255,255,255,.14)); }
+
+/* Details: closed by default, a terminal-style log when pressed */
+.working { flex-wrap: wrap; }
+.dt-root { flex: 1 0 100%; min-width: 0; margin-top: 6px; }
+.dt-btn { display: inline-flex; align-items: center; gap: 8px; padding: 2px 0; background: none; border: 0; cursor: pointer;
+  font-family: var(--mono, monospace); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim, #8b90a0); }
+.dt-btn::before { content: ""; width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform .15s ease; }
+.dt-root.open .dt-btn::before { transform: rotate(45deg); }
+.dt-btn:hover { color: var(--hi, #fff); }
+.dt-btn:focus-visible, .dt-copy:focus-visible, .dt-list:focus-visible { outline: 2px solid var(--focus, #7b8cff); outline-offset: 2px; }
+.dt-panel { margin-top: 8px; background: var(--surface, #0c0e13); border: 1px solid var(--line2, rgba(255,255,255,.14)); border-radius: var(--r, 4px); }
+.dt-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line, rgba(255,255,255,.08));
+  font-family: var(--mono, monospace); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--dim, #8b90a0); }
+.dt-copy { padding: 2px 8px; background: none; border: 1px solid var(--line2, rgba(255,255,255,.14)); border-radius: var(--r, 4px); cursor: pointer;
+  font: inherit; letter-spacing: .12em; color: var(--mute, #b3b7c4); }
+.dt-copy:hover { color: var(--hi, #fff); border-color: var(--line3, rgba(255,255,255,.22)); }
+.dt-list { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; padding: 8px 10px; text-align: left; text-transform: none; letter-spacing: normal;
+  font-family: var(--mono, monospace); font-size: 11.5px; line-height: 1.5; color: var(--mute, #b3b7c4); }
+.dt-item + .dt-item { margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--line, rgba(255,255,255,.08)); }
+.dt-line { display: flex; gap: 8px; }
+.dt-n { flex: none; min-width: 1.6em; color: var(--acc-text, #8a96ff); }
+.dt-t { min-width: 0; overflow-wrap: anywhere; }
+.dt-cmd, .dt-out { margin: 4px 0 0 calc(1.6em + 8px); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dt-cmd { color: var(--g-cyan, var(--acc-text, #8a96ff)); }
+.dt-out { max-height: 140px; overflow-y: auto; color: var(--dim, #8b90a0); }
+.working, .progress.live { animation: none; } /* moving the bar must not replay a fade-in */
+
+/* thinking: a quiet level meter */
+#thinkBtn { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 11px; border: 1px solid var(--line2); border-radius: 999px;
+  background: transparent; color: var(--dim); font-size: var(--fs-xs); white-space: nowrap; }
+#thinkBtn.on { color: var(--dim); border-color: var(--line2); }
+#thinkBtn:hover:not(:disabled) { color: var(--hi); border-color: var(--line3); }
+.tk-m { display: inline-flex; align-items: flex-end; gap: 2px; height: 11px; }
+.tk-m i { width: 3px; border-radius: 1px; background: var(--line3); }
+.tk-m i:nth-child(1) { height: 5px; } .tk-m i:nth-child(2) { height: 8px; } .tk-m i:nth-child(3) { height: 11px; }
+.tk-m i.on { background: var(--acc); }
+.tk-v { min-width: 5.6ch; color: var(--text); font-weight: 500; }
+#thinkBtn:disabled .tk-v { color: var(--dim); }
+
+/* a visible Preview tab on the right edge while the pane is closed */
+#pvTab { position: fixed; right: 0; top: 50%; z-index: 30; transform: translateY(-50%); padding: 12px 7px; writing-mode: vertical-rl;
+  font-size: var(--fs-label); font-weight: 600; letter-spacing: var(--track); text-transform: uppercase; color: var(--dim); background: var(--panel); cursor: pointer;
+  border: 1px solid var(--line2); border-right: 0; border-radius: var(--r2) 0 0 var(--r2); }
+#pvTab:hover { color: var(--hi); background: var(--raised); }
+#pvTab[hidden] { display: none !important; }

@@ -84,6 +84,15 @@ except Exception:
     def agent_step(name, args):
         return {"kind": "work", "text": "Working on it"}
 try:
+    from detail_text import agent_detail, clip as clip_detail, MAX_OUT as DETAIL_OUT
+except Exception:  # the Details view just gets nothing
+    def agent_detail(name, args):
+        return ""
+
+    def clip_detail(text, limit):
+        return str(text)[:limit]
+    DETAIL_OUT = 700
+try:
     from browse_policy import wants_browser
 except Exception:  # if the helper is missing, behave as before (browsing allowed)
     def wants_browser(text):
@@ -473,8 +482,9 @@ def main(task: str, images: list[str] | None = None) -> None:
             if not IN_AURA:  # inside the Aura app the raw steps stay in logs/agent.log only
                 print(f"[{step}] {name}: {json.dumps(args)[:200]}", flush=True)
             ev = agent_step(name, args)
-            emit({"t": "step", "kind": ev.get("kind", "work"), "text": ev.get("text", "")})
+            emit({"t": "step", "kind": ev.get("kind", "work"), "text": ev.get("text", ""), "detail": agent_detail(name, args)})
             out = run_tool(name, args)
+            emit({"t": "result", "out": clip_detail(out, DETAIL_OUT)})
             log(f"{name} {json.dumps(args)[:300]} -> {out[:300]}")
             sig = name + json.dumps(args, sort_keys=True)
             repeats = repeats + 1 if sig == last_sig else 0

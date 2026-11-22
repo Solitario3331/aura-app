@@ -3,7 +3,8 @@
 The page may switch to another chat and come back later; it then gets this snapshot (text so far + step
 lines) instead of the events it missed. Events are small dicts:
   {"t": "new_bubble"} | {"t": "text", "text": <whole text of the current bubble>} |
-  {"t": "tool"/"step", "kind": ..., "text": ...} | {"t": "phase", "kind": ...} | {"t": "done"/"closed", ...}
+  {"t": "tool"/"step", "kind": ..., "text": ..., "detail": ...} | {"t": "result", "out": ...} |
+  {"t": "phase", "kind": ...} | {"t": "done"/"closed", ...}
 
 apply(items, ev)  updates the snapshot list in place.
 push(queue, ev)   adds an event to a waiting queue; consecutive "text" events collapse into the newest one
@@ -11,6 +12,7 @@ push(queue, ev)   adds an event to a waiting queue; consecutive "text" events co
 """
 MAX_ITEMS = 200
 MAX_QUEUE = 500
+MAX_OUT = 1500
 
 
 def apply(items, ev) -> None:
@@ -28,7 +30,18 @@ def apply(items, ev) -> None:
             items.append({"k": "text", "text": text, "open": True})
     elif t in ("tool", "step"):
         _close(items)
-        items.append({"k": "chip", "kind": ev.get("kind") or "work", "text": str(ev.get("text") or "")})
+        chip = {"k": "chip", "kind": ev.get("kind") or "work", "text": str(ev.get("text") or "")}
+        if isinstance(ev.get("detail"), str) and ev["detail"]:
+            chip["detail"] = ev["detail"]
+        items.append(chip)
+    elif t == "result":  # the output of the newest step (Details view)
+        out = ev.get("out")
+        if isinstance(out, str) and out:
+            for it in reversed(items):
+                if it.get("k") == "chip":
+                    prev = it.get("out")
+                    it["out"] = ((prev + "\n" + out) if prev else out)[:MAX_OUT]
+                    break
     elif t in ("done", "closed"):
         del items[:]
     if len(items) > MAX_ITEMS:  # drop the oldest step lines first, never text

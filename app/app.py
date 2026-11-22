@@ -44,6 +44,7 @@ from chat_context import build_context, strip_tag
 from frame_policy import can_embed
 from site_finder import newest_html
 from step_text import claude_step
+from detail_text import clip as clip_detail, claude_detail, claude_result, MAX_DETAIL, MAX_OUT
 from tool_kind import tool_kind_from_line
 from url_input import normalize_input
 
@@ -1200,8 +1201,13 @@ class Api:
             return
         if isinstance(ev.get("text"), str):
             ev["text"] = " ".join(mask_names(ev["text"]).split())[:200]
+        for key, lim in (("detail", MAX_DETAIL), ("out", MAX_OUT)):  # Details view: raw command / output
+            if isinstance(ev.get(key), str):
+                ev[key] = clip_detail(ev[key], lim)
+            else:
+                ev.pop(key, None)
         with job["lock"]:
-            if ev.get("t") == "step":  # the page shows one tidy line: no filler, no step twice in a row
+            if ev.get("t") == "step" and not ev.get("detail"):  # one tidy line: no filler, no step twice in a row
                 text, live = ev.get("text") or "", job["live"]
                 if (not text or text.lower().rstrip(".") in FILLER_STEPS
                         or (live and live[-1].get("k") == "chip" and live[-1].get("text") == text)):
@@ -1281,7 +1287,7 @@ class Api:
                         ev = json.loads(line[len(PROGRESS_PREFIX):])
                     except ValueError:
                         return
-                    if isinstance(ev, dict) and ev.get("t") in ("step", "phase"):
+                    if isinstance(ev, dict) and ev.get("t") in ("step", "phase", "result"):
                         self._job_event(job, ev)
 
             def on_start(proc):
@@ -1592,6 +1598,11 @@ class Api:
                         kind, label = None, None
                     ev["kind"] = (label or {}).get("kind") or kind or "work"
                     ev["text"] = (label or {}).get("text") or CHIP_TEXT.get(ev["kind"], "Completed a task")
+                    ev["detail"] = claude_detail(line)
+            if not events and '"tool_result"' in line:  # what a tool printed (Details view)
+                out = claude_result(line)
+                if out:
+                    events.append({"t": "result", "out": out})
             return events
 
         try:

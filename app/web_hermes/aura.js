@@ -930,6 +930,67 @@
     return function () { clearInterval(timer); checkSite(since); };
   }
 
+  /* ---------- Details: a terminal-style log of what Aura really runs (opens only when you press it) ---------- */
+  function detailsWidget() {
+    var rows = [], seq = 0, open = false, MAXROWS = 200;
+    var root = document.createElement("div"); root.className = "dt-root";
+    var btn = document.createElement("button"); btn.type = "button"; btn.className = "dt-btn"; btn.setAttribute("aria-expanded", "false");
+    var panel = document.createElement("div"); panel.className = "dt-panel"; panel.hidden = true;
+    var bar = document.createElement("div"); bar.className = "dt-bar";
+    var ttl = document.createElement("span"); ttl.textContent = "What Aura is doing";
+    var copy = document.createElement("button"); copy.type = "button"; copy.className = "dt-copy"; copy.textContent = "Copy log";
+    bar.appendChild(ttl); bar.appendChild(copy);
+    var list = document.createElement("div"); list.className = "dt-list"; list.setAttribute("role", "log"); list.tabIndex = 0;
+    panel.appendChild(bar); panel.appendChild(list);
+    root.appendChild(btn); root.appendChild(panel);
+    function label() { btn.textContent = "Details · " + rows.length + (rows.length === 1 ? " step" : " steps"); }
+    function atBottom() { return list.scrollHeight - list.scrollTop - list.clientHeight < 28; }
+    function toBottom() { list.scrollTop = list.scrollHeight; }
+    btn.addEventListener("click", function () {
+      open = !open; panel.hidden = !open; root.classList.toggle("open", open);
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) toBottom();
+    });
+    copy.addEventListener("click", function () {
+      var text = rows.map(function (r) { return r.n + ". " + r.text + (r.detail ? "\n" + r.detail : "") + (r.out ? "\n" + r.out : ""); }).join("\n\n");
+      copyText(text).then(function () { toast("Log copied."); });
+    });
+    function paintOut(r) {
+      if (!r.out) return;
+      if (!r.outEl) { r.outEl = document.createElement("pre"); r.outEl.className = "dt-out"; r.el.appendChild(r.outEl); }
+      r.outEl.textContent = r.out;
+    }
+    return {
+      root: root,
+      mount: function (parent) { parent.appendChild(root); },
+      detach: function () { if (root.parentNode) root.parentNode.removeChild(root); return root; },
+      count: function () { return rows.length; },
+      getScroll: function () { return list.scrollTop; },
+      setScroll: function (v) { list.scrollTop = v; },
+      add: function (it) {
+        var stick = !open || atBottom();
+        var r = { n: ++seq, text: String(it.text || "Step"), detail: String(it.detail || ""), out: "" };
+        r.el = document.createElement("div"); r.el.className = "dt-item";
+        var line = document.createElement("div"); line.className = "dt-line";
+        var n = document.createElement("span"); n.className = "dt-n"; n.textContent = String(r.n);
+        var t = document.createElement("span"); t.className = "dt-t"; t.textContent = r.text;
+        line.appendChild(n); line.appendChild(t); r.el.appendChild(line);
+        if (r.detail) { var c = document.createElement("pre"); c.className = "dt-cmd"; c.textContent = r.detail; r.el.appendChild(c); }
+        list.appendChild(r.el); rows.push(r);
+        if (rows.length > MAXROWS) { var old = rows.shift(); if (old.el.parentNode) old.el.remove(); }
+        label();
+        if (open && stick) toBottom();
+      },
+      result: function (out) {
+        var r = rows[rows.length - 1]; if (!r) return;
+        var stick = !open || atBottom();
+        r.out = (r.out ? r.out + "\n" + out : String(out)).slice(0, 1500);
+        paintOut(r);
+        if (open && stick) toBottom();
+      }
+    };
+  }
+
   /* The live work of the open chat: status line with timer, streamed text (Aura mode), step lines
      ("Reading notes.pdf", "Saving index.html"...), then the answer. run = { kind: "aura"|"job", phase,
      elapsed (s), items (what already happened, when coming back to the chat) }. Returns a view:
@@ -947,9 +1008,23 @@
       if (pending) { renderRich(pending.el, pending.text); scrollDown(); }
       pending = null;
     }
-    function keepStatusLast() { messagesEl.appendChild(st.el); scrollDown(); }
+    function keepStatusLast() { // only move the bar when something came after it; keep an open log where it was
+      if (messagesEl.lastElementChild !== st.el) {
+        var sc = dt ? dt.getScroll() : 0;
+        messagesEl.appendChild(st.el);
+        if (dt) dt.setScroll(sc);
+      }
+      scrollDown();
+    }
+    var dt = null; // the Details log of this run; created with the first step
+    function dtAdd(it) {
+      if (!it || (!it.detail && !it.text)) return;
+      if (!dt) { dt = detailsWidget(); dt.mount(st.el); }
+      dt.add(it);
+    }
+    function dtResult(out) { if (dt && out) dt.result(out); }
     function newBubble() { cur = addBubble("assistant", ""); keepStatusLast(); }
-    function chip(it) { if (kind === "job") { st.step(it); return; } addChip(CHIP_PREFIX + (it.text || CHIP[it.kind] || "Completed a task")); cur = null; }
+    function chip(it) { dtAdd(it); if (kind === "job") { st.step(it); return; } addChip(CHIP_PREFIX + (it.text || CHIP[it.kind] || "Completed a task")); cur = null; }
     function close(keepRunning) {
       if (finished) return false;
       finished = true; v.live = false;
@@ -965,11 +1040,13 @@
       if (raf) { cancelAnimationFrame(raf); flush(); } // draw the last text first
       if (cur && !cur.textContent.trim() && cur.parentNode) cur.parentNode.remove(); // never leave an empty bubble
       if (kind === "job") st.settle(); // the progress block stays as one quiet summary line above the answer
+      var keepDt = (kind === "aura" && dt && dt.count()) ? dt.detach() : null; // Aura mode: the log stays under the answer
       close(false);
       if (e.t === "closed") addBubble("assistant", "Aura stopped unexpectedly. Please send your message again.", "error");
       else if (e.note) addBubble("assistant", e.text || "Stopped.", "note");
       else if (e.error) addBubble("assistant", e.text || "Something went wrong. Please try again.", "error");
       else if (kind === "job") addBubble("assistant", e.text || "No answer.");
+      if (keepDt) { messagesEl.appendChild(keepDt); scrollDown(); }
       refreshSessions();
       if (!document.querySelector(".modal-back") && !termVisible()) focusInput();
     }
@@ -981,6 +1058,7 @@
         pending = { el: cur, text: e.text || "" };
         if (!raf) raf = requestAnimationFrame(flush);
       } else if (e.t === "tool" || e.t === "step") { chip(e); st.phase(e.kind || "work"); keepStatusLast(); }
+      else if (e.t === "result") dtResult(e.out);
       else if (e.t === "phase") { if (!stopAsked) st.phase(e.kind || "think"); }
       else if (e.t === "done" || e.t === "closed") { finish(e); return true; }
       return false;
@@ -999,7 +1077,7 @@
         timer = setTimeout(poll, delay);
       }).catch(function () { if (!finished) timer = setTimeout(poll, 600); });
     }
-    (run.items || []).forEach(function (it) { if (it.k === "text") cur = addBubble("assistant", it.text || ""); else chip(it); });
+    (run.items || []).forEach(function (it) { if (it.k === "text") cur = addBubble("assistant", it.text || ""); else { chip(it); if (it.out) dtResult(it.out); } });
     keepStatusLast();
     v.start = function () { if (!finished && !v.live) { v.live = true; poll(); } return v; };
     v.stopped = function () { return !!stopAsked; };
@@ -1071,7 +1149,10 @@
     var b = $("thinkBtn"); if (!b) return;
     var locked = mode === "auto" || mode === "polish";
     var lv = mode === "auto" ? "off" : mode === "polish" ? "high" : thinkLevel;
-    b.textContent = "Thinking: " + lv.charAt(0).toUpperCase() + lv.slice(1);
+    var name = lv.charAt(0).toUpperCase() + lv.slice(1), n = THINK_STEPS.indexOf(lv); // bars lit: off 0, low 1, medium 2, high 3
+    b.innerHTML = '<span class="tk-l">Thinking</span><span class="tk-m" aria-hidden="true"><i' + (n > 0 ? ' class="on"' : '') + '></i><i' +
+      (n > 1 ? ' class="on"' : '') + '></i><i' + (n > 2 ? ' class="on"' : '') + '></i></span><span class="tk-v">' + name + '</span>';
+    b.setAttribute("aria-label", "Thinking: " + name + (locked ? "" : ". Click to change."));
     b.classList.toggle("on", lv !== "off");
     b.disabled = locked;
     b.title = mode === "auto" ? "Quick never thinks" : mode === "polish" ? "Polish always thinks" : "Click to change how much Aura thinks";
@@ -1379,6 +1460,7 @@
   $("pvTab").addEventListener("click", openBrowser);
   $("paneToggle").addEventListener("click", function () { if (paneOpen()) closeBrowser(); else openBrowser(); });
   updNav();
+  $("pvTab").hidden = paneOpen(); // visible from the start while the pane is closed
 
   /* The assistant can ask for a website to be opened (control door -> poll_open). */
   function pollOpen() {
@@ -1893,8 +1975,6 @@
   noMatch.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg><span>No chats match</span>';
   function applyFilter() {
     var q = filter.value.trim().toLowerCase(), shown = 0;
-    if (q && !showAllChats && sessions.length > RECENT) { showAllChats = true; renderSessions(); return; }
-    if (!q && showAllChats) { showAllChats = false; renderSessions(); return; }
     var rows = list.querySelectorAll(".session");
     Array.prototype.forEach.call(rows, function (row) {
       var out = !!q && (row.title || row.textContent).toLowerCase().indexOf(q) < 0;

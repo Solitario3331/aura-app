@@ -404,7 +404,7 @@ body.can-stop #sendBtn { display: none; }
 .pv-card button:hover { border-color: var(--acc); background: var(--acc-soft); color: var(--hi); }
 
 /* old right-edge tab: kept for the page logic, never shown (the globe button replaced it) */
-#pvTab { display: none !important; }
+/* (the PREVIEW tab is styled at the end of this file) */
 
 /* =====================================================================
    Toast + confirm dialog
@@ -735,3 +735,48 @@ body.calm .working::after, body.calm .progress.live::after { animation: none; }
 
 /* the block cursor sits at the start of an empty box: keep the hint text clear of it */
 #input:placeholder-shown { text-indent: 14px; }
+
+/* Details: closed by default, a terminal-style log when pressed */
+.working { flex-wrap: wrap; }
+.dt-root { flex: 1 0 100%; min-width: 0; margin-top: 6px; }
+.dt-btn { display: inline-flex; align-items: center; gap: 8px; padding: 2px 0; background: none; border: 0; cursor: pointer;
+  font-family: var(--mono, monospace); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim, #8b90a0); }
+.dt-btn::before { content: ""; width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform .15s ease; }
+.dt-root.open .dt-btn::before { transform: rotate(45deg); }
+.dt-btn:hover { color: var(--hi, #fff); }
+.dt-btn:focus-visible, .dt-copy:focus-visible, .dt-list:focus-visible { outline: 2px solid var(--focus, #7b8cff); outline-offset: 2px; }
+.dt-panel { margin-top: 8px; background: var(--surface, #0c0e13); border: 1px solid var(--line2, rgba(255,255,255,.14)); border-radius: var(--r, 4px); }
+.dt-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 10px; border-bottom: 1px solid var(--line, rgba(255,255,255,.08));
+  font-family: var(--mono, monospace); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--dim, #8b90a0); }
+.dt-copy { padding: 2px 8px; background: none; border: 1px solid var(--line2, rgba(255,255,255,.14)); border-radius: var(--r, 4px); cursor: pointer;
+  font: inherit; letter-spacing: .12em; color: var(--mute, #b3b7c4); }
+.dt-copy:hover { color: var(--hi, #fff); border-color: var(--line3, rgba(255,255,255,.22)); }
+.dt-list { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; padding: 8px 10px; text-align: left; text-transform: none; letter-spacing: normal;
+  font-family: var(--mono, monospace); font-size: 11.5px; line-height: 1.5; color: var(--mute, #b3b7c4); }
+.dt-item + .dt-item { margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--line, rgba(255,255,255,.08)); }
+.dt-line { display: flex; gap: 8px; }
+.dt-n { flex: none; min-width: 1.6em; color: var(--acc-text, #8a96ff); }
+.dt-t { min-width: 0; overflow-wrap: anywhere; }
+.dt-cmd, .dt-out { margin: 4px 0 0 calc(1.6em + 8px); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dt-cmd { color: var(--g-cyan, var(--acc-text, #8a96ff)); }
+.dt-out { max-height: 140px; overflow-y: auto; color: var(--dim, #8b90a0); }
+
+/* thinking: a quiet level meter that matches the mode buttons */
+#thinkBtn { display: inline-flex; align-items: center; gap: 10px; height: 28px; margin-left: auto; padding: 0 12px; border: 1px solid var(--line2); border-radius: var(--r);
+  background: transparent; color: var(--mute); font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .16em; text-transform: uppercase; white-space: nowrap; }
+#thinkBtn.on { color: var(--mute); border-color: var(--line2); }
+#thinkBtn:hover:not(:disabled) { color: var(--hi); border-color: var(--line3); }
+.tk-m { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.tk-m i { width: 3px; background: var(--line3); }
+.tk-m i:nth-child(1) { height: 5px; } .tk-m i:nth-child(2) { height: 8px; } .tk-m i:nth-child(3) { height: 12px; }
+.tk-m i.on { background: var(--acc-text); box-shadow: 0 0 6px var(--acc-glow); }
+.tk-v { min-width: 6.4ch; color: var(--text); }
+#thinkBtn:disabled .tk-v { color: var(--dim); }
+
+/* a visible PREVIEW tab on the right edge while the pane is closed */
+#pvTab { position: fixed; right: 0; top: 50%; z-index: 30; transform: translateY(-50%); padding: 12px 7px; writing-mode: vertical-rl;
+  font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .3em; color: var(--mute); background: var(--bg2); cursor: pointer;
+  border: 1px solid var(--line2); border-right: 0; border-radius: var(--r) 0 0 var(--r); }
+#pvTab::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-bottom: 10px; background: var(--acc); }
+#pvTab:hover { color: var(--hi); border-color: var(--acc); box-shadow: 0 0 14px var(--acc-glow); }
+#pvTab[hidden] { display: none !important; }
