@@ -97,6 +97,19 @@
     wrap.appendChild(bar); wrap.appendChild(pre);
     return wrap;
   }
+  function choiceBlock(options) {
+    var wrap = document.createElement("div"); wrap.className = "choices";
+    options.forEach(function (o) {
+      var b = document.createElement("button"); b.type = "button"; b.className = "choice"; b.textContent = o;
+      b.addEventListener("click", function () {
+        if (wrap.classList.contains("done") || busy) return;
+        wrap.classList.add("done"); b.classList.add("picked");
+        input.value = o; input.dispatchEvent(new Event("input")); send();
+      });
+      wrap.appendChild(b);
+    });
+    return wrap;
+  }
   function renderRich(el, text) {
     var out = document.createDocumentFragment();
     var lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
@@ -116,6 +129,8 @@
         var code = []; i++;
         while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
         i++;
+        if (m[1] === "choices") { var opts = code.map(function (x) { return x.trim(); }).filter(Boolean);
+          if (opts.length) { out.appendChild(choiceBlock(opts)); continue; } }
         out.appendChild(codeBlock(code.join("\n"), m[1]));
         continue;
       }
@@ -674,6 +689,7 @@
   /* Aura mode streams from the chat's own background process; the other modes run as a background job.
      Either way the answer is saved into THIS chat, even if you switch to another one meanwhile. */
   function startWork(sid, m, text, images) {
+    pushThink();
     var v = attachRun(sid, { kind: m === "claude" ? "aura" : "job", elapsed: 0, items: [],
                              phase: m === "big" ? "big" : m === "polish" ? "polish" : (images.length ? "look" : "think") });
     var imgs = images.length ? images : null;
@@ -685,6 +701,29 @@
   }
 
   /* ---------- modes ---------- */
+  /* ---------- thinking switch (Off / Low / Medium / High) ---------- */
+  var THINK_STEPS = ["off", "low", "medium", "high"], thinkLevel = "medium";
+  try { var tl0 = localStorage.getItem("auraThink"); if (THINK_STEPS.indexOf(tl0) >= 0) thinkLevel = tl0; } catch (e) {}
+  function paintThink() {
+    var b = $("thinkBtn"); if (!b) return;
+    var locked = mode === "auto" || mode === "polish";
+    var lv = mode === "auto" ? "off" : mode === "polish" ? "high" : thinkLevel;
+    b.textContent = "Thinking: " + lv.charAt(0).toUpperCase() + lv.slice(1);
+    b.classList.toggle("on", lv !== "off");
+    b.disabled = locked;
+    b.title = mode === "auto" ? "Quick never thinks" : mode === "polish" ? "Polish always thinks" : "Click to change how much Aura thinks";
+  }
+  function pushThink() { try { if (api && api.set_think) api.set_think(thinkLevel); } catch (e) {} }
+  (function initThink() {
+    var b = $("thinkBtn"); if (!b) return;
+    b.addEventListener("click", function () {
+      thinkLevel = THINK_STEPS[(THINK_STEPS.indexOf(thinkLevel) + 1) % THINK_STEPS.length];
+      try { localStorage.setItem("auraThink", thinkLevel); } catch (e) {}
+      paintThink(); pushThink();
+    });
+    paintThink();
+  })();
+
   function buildPills() {
     var wrap = $("pills");
     MODES.forEach(function (m) {
@@ -701,7 +740,7 @@
     $("pillHint").textContent = MODES[0].tip;
   }
   function setMode(m) {
-    mode = m.id;
+    mode = m.id; paintThink();
     Array.prototype.forEach.call($("pills").children, function (c) {
       var on = c.dataset.id === mode;
       c.classList.toggle("active", on);

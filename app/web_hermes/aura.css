@@ -627,3 +627,18 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
   .upd-ring { border-color: var(--acc); opacity: .6; }
   .upd-bar i { width: 100%; opacity: .5; }
 }
+
+/* choice cards (tap an option = it is sent as your reply) */
+.choices { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+.choice { text-align: left; font: inherit; font-size: var(--fs-sm); color: var(--text); background: var(--hover);
+  border: 1px solid var(--line2); border-radius: var(--r-lg, 8px); padding: 9px 13px; cursor: pointer; transition: border-color var(--dur), background var(--dur); }
+.choice:hover { border-color: var(--acc); background: var(--acc-soft); }
+.choices.done .choice { opacity: .45; cursor: default; pointer-events: none; }
+.choices.done .choice.picked { opacity: 1; border-color: var(--acc); background: var(--acc-soft); }
+
+/* thinking switch */
+#thinkBtn { font: inherit; font-size: var(--fs-xs); color: var(--dim); background: transparent; border: 1px solid var(--line2);
+  border-radius: 999px; padding: 4px 11px; cursor: pointer; white-space: nowrap; transition: color var(--dur), border-color var(--dur); }
+#thinkBtn.on { color: var(--acc); border-color: var(--acc); }
+#thinkBtn:hover:not(:disabled) { color: var(--hi); }
+#thinkBtn:disabled { opacity: .55; cursor: default; }

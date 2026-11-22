@@ -61,6 +61,8 @@ RESTART_WAIT_SECONDS = 45               # how long the old Aura waits for the ne
 AURA_MODEL = "claude-haiku-5-5"         # Aura mode (streaming chat)
 HELPER_MODEL = "claude-sonnet-5-5"      # Big project, and Quick mode when the local helper fails
 POLISH_MODEL = "claude-opus-5-5"        # Polish mode
+THINK_LEVELS = ("off", "low", "medium", "high")
+_THINK = {"level": "medium"}            # the Thinking switch in the page (saved by the page, sent on start)
 
 MODES = ("claude", "qwen", "auto", "big", "polish")
 IDLE_STOP_SECONDS = 20 * 60             # stop a chat's background process after 20 idle minutes
@@ -99,9 +101,15 @@ AURA_PERSONA = " ".join((
     "(if asked who made or built you, answer: \"I'm Aura, built by Amar & Arry.\").",
     "If anyone asks who Amar or Arry are, or asks anything about them, reply ONLY with a short cute line",
     "saying they are two lovebirds making something cute together (add a heart), with no other details about them.",
-    "When you do something on the PC, just say what you did in plain simple words.",
-    "Never ask the user to approve a command or to run something themselves; if something is blocked,",
-    "say you could not do it. Keep answers short. Follow the CLAUDE.md rules for who does the work.",
+    "You have FULL permission on this PC, like a terminal with everything approved: read, edit and create files,",
+    "run any command, install things. Never ask the user to approve a command or to run something themselves;",
+    "just do it. Deletes go to the Recycle Bin (restorable). When you did something on the PC, say what you did",
+    "in plain simple words. Follow the CLAUDE.md rules for who does the work.",
+    "Answer fully and clearly when the question needs it (explanations, plans, code, steps, comparisons) with",
+    "markdown headings, lists and code blocks; answer briefly only when a short answer is enough.",
+    "When you need the user to choose between options, do NOT use any question tool. Write the question, then",
+    "a block exactly like:\n```choices\nOption one\nOption two\nOption three\n```\nOne option per line, 2 to 5 options;",
+    "the user taps one and it comes back as their next message.",
     "To open a website, use do.bat (it opens the site inside Aura); never start a browser yourself.",
     "Open a website ONLY when the user asks to browse, open a site or look something up online;",
     "for 'show me', 'give me' or any request for information, a recipe or an answer, write the answer in the chat.",
@@ -167,11 +175,15 @@ def _friendly(text: str) -> str:
     return mask_names(text)
 
 
-def _clean_env() -> dict:
+def _clean_env(level=None) -> dict:
     """Environment for helper programs: no settings leaking in from a parent Claude session."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_CODE", "CLAUDECODE", "QWEN_MODEL"))}
     env.update(AURA_APP="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     env.setdefault("AGENT_DEADLINE", "540")   # a local task started by Aura mode (do.bat) wraps up within 9 minutes
+    env.pop("AGENT_THINK", None)
+    env.pop("MAX_THINKING_TOKENS", None)
+    if (level or _THINK["level"]) == "off":   # Thinking switched off: Claude and the local helper both skip it
+        env.update(MAX_THINKING_TOKENS="0", AGENT_THINK="off")
     for k in ("AURA_PROGRESS",):               # live step lines only where the app asks for them
         env.pop(k, None)
     return env
@@ -399,7 +411,13 @@ def _claude_project_dir() -> Path:
     return Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(ROOT))
 
 
-def run_claude(prompt, model, extra=None, timeout=1800, should_stop=None):
+def _effort_args(level=None) -> list:
+    """Claude's effort flag from the Thinking switch ('off' is handled by the environment instead)."""
+    level = level or _THINK["level"]
+    return ["--effort", level] if level in ("low", "medium", "high") else []
+
+
+def run_claude(prompt, model, extra=None, timeout=1800, should_stop=None, effort=None):
     """One-shot answer (Big project, Polish, Quick fallback). Returns None when Claude is not installed.
     Never hangs: the whole process tree is stopped on timeout or when should_stop() says so."""
     exe = shutil.which("claude")
@@ -407,9 +425,11 @@ def run_claude(prompt, model, extra=None, timeout=1800, should_stop=None):
         return None
     try:
         out, err, code, reason = no_window.run_capture(
-            [exe, "-p", "--model", model, "--permission-mode", "acceptEdits",
-             "--append-system-prompt", AURA_PERSONA, "--allowedTools"] + ONE_SHOT_ALLOWED + (extra or []),
-            timeout, cwd=str(ROOT), env=_clean_env(), input_text=prompt, should_stop=should_stop)
+            [exe, "-p", "--model", model, "--permission-mode", "bypassPermissions",
+             "--append-system-prompt", AURA_PERSONA,
+             "--disallowedTools", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+            + _effort_args(effort) + (extra or []),
+            timeout, cwd=str(ROOT), env=_clean_env(effort), input_text=prompt, should_stop=should_stop)
         if reason == "stopped":
             return "Stopped."
         if reason == "timeout":
@@ -1057,7 +1077,7 @@ class Api:
         """Do the work for one message. Returns (reply, who); who == "App" means a failure message."""
         stop = (lambda: job["stopped"]) if job else None
         if mode in ("qwen", "auto"):
-            reply = self._ask_local(text, images, job)
+            reply = self._ask_local(text, images, job, force_no_think=(mode == "auto"))  # Quick: never thinks
             if job and job["stopped"]:
                 return "Stopped.", "Note"
             if mode == "auto" and self._local_failed(reply):
@@ -1087,8 +1107,8 @@ class Api:
             _log("could not save the answer: " + repr(exc))
 
     @staticmethod
-    def _one_shot(prompt, model, who, extra=None, timeout=1800, stop=None):
-        reply = run_claude(prompt, model, extra, timeout, stop)
+    def _one_shot(prompt, model, who, extra=None, timeout=1800, stop=None, effort=None):
+        reply = run_claude(prompt, model, extra, timeout, stop, effort)
         if reply is None:
             return NOT_SET_UP, "App"
         if reply in (NOT_SIGNED_IN, TRY_AGAIN, INTERNAL_ERROR) or reply.startswith("Aura took too long"):
@@ -1209,7 +1229,7 @@ class Api:
             _log("job_stop failed: " + repr(exc))
             return False
 
-    def _ask_local(self, text, images, job=None) -> str:
+    def _ask_local(self, text, images, job=None, force_no_think=False) -> str:
         """Run the local assistant (agent.py). Failures come back as text starting with 'Error: '.
         Streams its step lines into the job, never runs longer than LOCAL_TIMEOUT, and only one local task
         runs at a time (others wait, and say so)."""
@@ -1235,7 +1255,7 @@ class Api:
             got_lock = True
             if job and job["stopped"]:
                 return "Stopped."
-            env = _clean_env()
+            env = _clean_env("off" if force_no_think else None)
             env.update(AURA_PROGRESS="1", AGENT_DEADLINE=str(LOCAL_DEADLINE), PYTHONUNBUFFERED="1")
 
             def on_line(line):
@@ -1305,7 +1325,7 @@ class Api:
         prompt = ("FINAL POLISH, one pass only: " + text + ". Make the project more modern, professional and solid"
                   " (design/UX, structure, error handling, speed, small bugs). Focused edits only inside this folder,"
                   " never delete files, confirm nothing broke, reply in 3-5 lines." + site_note)
-        return self._one_shot(prompt, POLISH_MODEL, "Opus", extra, CLAUDE_TIMEOUTS["polish"], stop)
+        return self._one_shot(prompt, POLISH_MODEL, "Opus", extra, CLAUDE_TIMEOUTS["polish"], stop, "high")  # Polish always thinks
 
     # ---- updates ----
     def check_update(self) -> dict:
@@ -1471,6 +1491,13 @@ class Api:
         except Exception as exc:
             _log("closing windows before restart: " + repr(exc))
 
+    def set_think(self, level) -> dict:
+        """The page's Thinking switch: off / low / medium / high (applies from the next message)."""
+        level = str(level or "").lower()
+        if level in THINK_LEVELS:
+            _THINK["level"] = level
+        return {"ok": True, "level": _THINK["level"]}
+
     def update_notice(self) -> str:
         """The version Aura was just updated to (once, right after the restart), else ''."""
         v, self._updated_to = self._updated_to, ""
@@ -1482,15 +1509,19 @@ class Api:
         with self._chats_lock:
             st = self._chats.get(sid)
             if st and st["proc"].poll() is None:
-                return st
+                if st.get("think") == _THINK["level"] or st.get("busy"):
+                    return st
+                _kill_tree(st["proc"])  # the Thinking level changed: restart it (the same conversation is resumed)
+                self._chats.pop(sid, None)
             exe = shutil.which("claude")
             if not exe:
                 _log("claude executable not found on PATH")
                 return None
             cmd = ([exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                    "--verbose", "--include-partial-messages", "--permission-mode", "auto",
-                    "--model", AURA_MODEL, "--append-system-prompt", AURA_PERSONA, "--allowedTools"]
-                   + AURA_ALLOWED + _claude_session(sid))
+                    "--verbose", "--include-partial-messages", "--permission-mode", "bypassPermissions",
+                    "--model", AURA_MODEL, "--append-system-prompt", AURA_PERSONA,
+                    "--disallowedTools", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+                   + _effort_args() + _claude_session(sid))
             try:
                 proc = subprocess.Popen(
                     cmd, cwd=str(ROOT), env=_clean_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1500,7 +1531,7 @@ class Api:
                 return None
             st = {"proc": proc, "events": [], "live": [], "lock": threading.Lock(), "stopped": False,
                   "busy": False, "last": time.time(), "started": time.time(), "phase": "think", "mode": "claude",
-                  "tr": Translator(), "noise": []}
+                  "tr": Translator(), "noise": [], "think": _THINK["level"]}
             self._chats[sid] = st
             if not self._reaper_on:
                 self._reaper_on = True

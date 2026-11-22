@@ -428,6 +428,8 @@ def main(task: str, images: list[str] | None = None) -> None:
     log(f"TASK: {task}" + (f" [images: {', '.join(images)}]" if images else ""))
 
     think = bool(needs_thinking(task, bool(images)))  # slow "thinking" only when the request needs real reasoning
+    if os.environ.get("AGENT_THINK") == "off":  # the app's Thinking switch (and Quick mode) turns it off
+        think = False
     request = task.split("New request from the user:")[-1].lower()
     vary = bool(ANOTHER_ANSWER.search(request))
     BROWSE_OK = bool(wants_browser(task))
