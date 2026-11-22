@@ -1284,12 +1284,46 @@
     }).catch(function () { note.textContent = "Could not check for updates right now."; })
       .then(function () { btn.classList.remove("busy"); btn.removeAttribute("aria-busy"); });
   }
+
+  /* Discord-style pop-up at the top when a new version is ready (once per version per session) */
+  var updPopShown = "";
+  function updPopHide() {
+    var p = $("updPop"); if (!p) return;
+    p.classList.remove("show"); setTimeout(function () { if (p.parentNode) p.remove(); }, 300);
+  }
+  function updPop(v) {
+    if (!v || updPopShown === v || updBusy) return;
+    try { if (sessionStorage.getItem("updPopSeen") === v) return; } catch (x) { /* ignore */ }
+    updPopShown = v;
+    updPopHide();
+    var p = document.createElement("div"); p.id = "updPop"; p.setAttribute("role", "status");
+    p.innerHTML = '<div class="up-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg></div>' +
+      '<div class="up-txt"><b>Update available</b><span>Aura ' + (v === "new" ? "has a new version" : "v" + String(v).replace(/[^0-9a-zA-Z.\-]/g, "")) + ' is ready.</span></div>' +
+      '<button type="button" class="up-go">Update now</button><button type="button" class="up-later" aria-label="Later">Later</button>';
+    document.body.appendChild(p);
+    p.querySelector(".up-go").addEventListener("click", function () {
+      try { sessionStorage.setItem("updPopSeen", v); } catch (x) { /* ignore */ }
+      updPopHide(); runUpdate();
+    });
+    p.querySelector(".up-later").addEventListener("click", function () {
+      try { sessionStorage.setItem("updPopSeen", v); } catch (x) { /* ignore */ }
+      updPopHide();
+    });
+    requestAnimationFrame(function () { p.classList.add("show"); });
+  }
+  function quietCheck() {
+    api.check_update().then(function (r) {
+      if (r && r.newer) { setUpdateBadge(r.version || "new"); updPop(r.version || "new"); }
+    }).catch(noop);
+  }
+
   function startUpdateChecks(splashMs) {
     if (api.update_notice) api.update_notice().then(function (v) {
       if (v) setTimeout(function () { toast("Updated to v" + v); }, splashMs);
     }).catch(noop);
     setTimeout(function () { /* quiet check, never installs anything by itself */
-      api.check_update().then(function (r) { if (r && r.newer) setUpdateBadge(r.version || "new"); }).catch(noop);
+      quietCheck();
+      setInterval(quietCheck, 30 * 60 * 1000); /* and again every 30 minutes while Aura stays open */
     }, 5000);
   }
 

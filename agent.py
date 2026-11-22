@@ -126,7 +126,7 @@ TOOLS = [
           "Use it to download files (Invoke-WebRequest, curl.exe, winget, ollama pull), "
           "install things, list files, open programs (Start-Process).", command=1),
     _tool("read_file", "Read a text file.", path=1),
-    _tool("write_file", "Create a NEW text file (never overwrites an existing file outside the qwen-test folder).",
+    _tool("write_file", "Create a text file, or replace an existing one inside the user folder (the old version is backed up automatically).",
           path=1, content=1),
     _tool("delete_to_recycle_bin",
           "Delete a file or folder by moving it to the Windows Recycle Bin (can be restored). "
@@ -246,11 +246,24 @@ def _run_powershell(cmd: str) -> str:
 def _write_file(path: str, content: str) -> str:
     p = Path(path)
     inside = ROOT.resolve() in p.resolve().parents
+    note = ""
     if p.exists() and not inside:
-        return "REFUSED: file already exists, not overwriting."
+        # Changing an existing file is allowed only inside the user folder, and the old version is kept first.
+        rp = p.resolve()
+        if not rp.is_file() or HOME.resolve() not in rp.parents:
+            return "REFUSED: file already exists, not overwriting."
+        try:
+            import shutil
+            keep = HOME / "Aura" / "overwritten"
+            keep.mkdir(parents=True, exist_ok=True)
+            saved = keep / (time.strftime("%Y%m%d_%H%M%S_") + rp.name)
+            shutil.copy2(rp, saved)
+        except OSError as e:
+            return f"REFUSED: could not save a backup of the old file first ({e})."
+        note = f" (old version saved to {saved})"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
-    return f"written: {p}"
+    return f"written: {p}{note}"
 
 
 def _delete_to_recycle_bin(path: str) -> str:
