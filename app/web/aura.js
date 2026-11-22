@@ -226,7 +226,69 @@
     if (last && last.classList.contains("assistant") && last.querySelector(".act.regen")) last.classList.add("last-reply");
   }
   if (window.MutationObserver) new MutationObserver(markLastReply).observe(messagesEl, { childList: true });
+  /* The input says "Reply to Aura..." as soon as the chat has messages (like Claude), "Message Aura..." on an empty chat. */
+  var basePlaceholder = input.placeholder || "Message Aura...";
+  var IDEAS = [
+    "Build me a tiny website about my cat...", "Show me what takes the most space in my Downloads folder...",
+    "Give me a fun fact I can tell my friends...", "Plan a surprise date night...", "Ask me a silly question, I dare you...",
+    "Make me a small game to play...", "Find a dinner recipe using only rice and eggs...", "Teach me something cool in 30 seconds...",
+    "Write a poem about Monday...", "Why is my PC slow? Let's find out...", "Explain quantum physics like I'm five...",
+    "What should we build today?", "Teach me 5 useful Greek phrases...", "Help me politely say no to a plan...",
+    "Open YouTube and find a chill playlist..."
+  ];
+  var emptyIdea = "";
+  function pickIdea() {
+    var p = emptyIdea;
+    for (var i = 0; i < 6 && p === emptyIdea; i++) p = IDEAS[Math.floor(Math.random() * IDEAS.length)];
+    return p;
+  }
+  function paintPlaceholder() {
+    var want;
+    if (messagesEl.querySelector(".msg")) { emptyIdea = ""; want = basePlaceholder.replace(/^Message Aura/, "Reply to Aura"); }
+    else { if (!emptyIdea) emptyIdea = pickIdea(); want = emptyIdea; }
+    if (input.placeholder !== want) input.placeholder = want;
+  }
+  if (window.MutationObserver) new MutationObserver(paintPlaceholder).observe(messagesEl, { childList: true });
+  paintPlaceholder();
   input.addEventListener("input", function () { if (!input.value) editing = false; });
+
+  /* Select text in a message: a small Reply button floats next to the selection and quotes just that part. */
+  var selBtn = null, selText = "";
+  function selHide() { if (selBtn) { selBtn.remove(); selBtn = null; } selText = ""; }
+  function selCheck() {
+    var s = window.getSelection();
+    if (!s || s.isCollapsed || !s.rangeCount) { selHide(); return; }
+    var txt = s.toString().replace(/\s+/g, " ").trim();
+    if (!txt) { selHide(); return; }
+    var r = s.getRangeAt(0), n = r.commonAncestorContainer;
+    n = n.nodeType === 1 ? n : n.parentNode;
+    var bub = n && n.closest ? n.closest(".bubble") : null;
+    if (!bub || !messagesEl.contains(bub)) { selHide(); return; }
+    selText = txt;
+    if (!selBtn) {
+      selBtn = document.createElement("button"); selBtn.type = "button"; selBtn.className = "sel-reply";
+      selBtn.setAttribute("aria-label", "Reply to the selected text");
+      selBtn.innerHTML = ICO.reply + "<span>Reply</span>";
+      selBtn.addEventListener("mousedown", function (e) { e.preventDefault(); }); /* keep the selection alive */
+      selBtn.addEventListener("click", function () {
+        var t = selText; if (!t) return;
+        if (t.length > 300) t = t.slice(0, 297) + "...";
+        var d = input.value;
+        selHide();
+        try { window.getSelection().removeAllRanges(); } catch (x) { /* ignore */ }
+        putInInput("Re: “" + t + "”\n" + d);
+      });
+      document.body.appendChild(selBtn);
+    }
+    var rect = r.getBoundingClientRect(), w = selBtn.offsetWidth || 74;
+    var top = rect.top - 38; if (top < 8) top = rect.bottom + 8;
+    var left = Math.max(8, Math.min(window.innerWidth - w - 8, rect.left + rect.width / 2 - w / 2));
+    selBtn.style.top = Math.round(top) + "px"; selBtn.style.left = Math.round(left) + "px";
+  }
+  document.addEventListener("mouseup", function () { setTimeout(selCheck, 0); });
+  document.addEventListener("keyup", function (e) { if (e.shiftKey || e.key === "Escape") setTimeout(selCheck, 0); });
+  messagesEl.addEventListener("scroll", selHide, { passive: true });
+  window.addEventListener("resize", selHide);
 
   /* ---------- messages ---------- */
   function addBubble(role, text, kind) {
@@ -260,20 +322,20 @@
   /* Status line like Claude's: animated symbol, shimmering word that fits the phase, live timer. */
   var GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
   var STATUS = {
-    think:  { seq: false, words: ["Thinking", "Pondering", "Cogitating", "Ruminating", "Noodling", "Percolating", "Musing", "Mulling it over", "Brewing", "Simmering", "Contemplating", "Deliberating"] },
-    look:   { seq: false, words: ["Looking at the picture", "Studying the image", "Taking a close look", "Reading the picture"] },
-    read:   { seq: false, words: ["Going through the files", "Taking a look", "Checking the files"] },
-    search: { seq: false, words: ["Looking around", "Digging through the files", "Hunting it down"] },
-    edit:   { seq: false, words: ["Making changes", "Shaping it", "Writing it out"] },
-    work:   { seq: false, words: ["Getting it done", "Handling it", "Taking care of it", "On it"] },
-    run:    { seq: false, words: ["Running it", "Executing", "Crunching through it"] },
-    build:  { seq: false, words: ["Building", "Testing the pieces", "Putting the pieces together"] },
-    web:    { seq: false, words: ["Looking it up", "Checking online"] },
-    plan:   { seq: false, words: ["Planning", "Mapping it out", "Splitting the job"] },
-    write:  { seq: false, words: ["Writing", "Putting it together", "Shaping the answer", "Wrapping up"] },
+    think:  { seq: false, words: ["Thinking"] },
+    look:   { seq: false, words: ["Looking at the picture"] },
+    read:   { seq: false, words: ["Reading files"] },
+    search: { seq: false, words: ["Searching"] },
+    edit:   { seq: false, words: ["Editing files"] },
+    work:   { seq: false, words: ["Working"] },
+    run:    { seq: false, words: ["Running a command"] },
+    build:  { seq: false, words: ["Building and testing"] },
+    web:    { seq: false, words: ["Looking it up"] },
+    plan:   { seq: false, words: ["Planning"] },
+    write:  { seq: false, words: ["Writing the answer"] },
     big:    { seq: true,  words: ["Planning", "Splitting the job", "Building the pieces", "Testing the pieces", "Connecting everything", "Checking the result"] },
     polish: { seq: true,  words: ["Reviewing", "Looking for rough edges", "Polishing", "Refining the details", "Final checks"] },
-    wait:   { seq: false, words: ["Waiting for the other chat to finish", "Waiting in line"] },
+    wait:   { seq: false, words: ["Waiting for the other chat"] },
     stop:   { seq: true,  words: ["Stopping"] }
   };
   var CHIP_PREFIX = "▸ ";
@@ -305,7 +367,7 @@
     function meta() {
       var s = Math.floor((Date.now() - t0) / 1000);
       var time = s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
-      var text = "(" + time + (document.body.classList.contains("can-stop") ? " · esc to interrupt" : "") + ")";
+      var text = time + (document.body.classList.contains("can-stop") ? " · esc to stop" : "");
       if (m.textContent !== text) m.textContent = text;
     }
     pick(); meta();
@@ -358,7 +420,7 @@
       if (t.textContent !== txt) t.textContent = txt;
     }
     function meta() {
-      var txt = fmtSecs(secs()) + (document.body.classList.contains("can-stop") ? " · esc to interrupt" : "");
+      var txt = fmtSecs(secs()) + (document.body.classList.contains("can-stop") ? " · esc to stop" : "");
       if (m.textContent !== txt) m.textContent = txt;
     }
     paint(); meta();
@@ -488,7 +550,7 @@
         for (var k = RECENT; k < sessions.length; k++) if (sessions[k].id === currentId) { visible = visible.concat([sessions[k]]); break; }
       }
       visible.forEach(function (s) { frag.appendChild(sessionRow(s)); });
-      if (sessions.length > RECENT) frag.appendChild(moreButton(list));
+      if (sessions.length > 0) frag.appendChild(moreButton(list));
     }
     list.textContent = "";
     list.appendChild(frag);
@@ -496,20 +558,119 @@
   function moreButton(list) {
     var more = document.createElement("button"), older = sessions.length - RECENT;
     more.type = "button"; more.className = "more-chats";
-    more.setAttribute("aria-expanded", showAllChats ? "true" : "false");
-    more.title = showAllChats ? "Show only the latest chats" : older + " older chat" + (older === 1 ? "" : "s");
+    more.setAttribute("aria-haspopup", "dialog");
+    more.title = "Open the full chat history";
     var label = document.createElement("span");
-    label.textContent = showAllChats ? "Show less" : "Show all (" + sessions.length + ")";
+    label.textContent = "All chats (" + sessions.length + ")";
     more.appendChild(label);
     more.insertAdjacentHTML("beforeend", '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="'
-      + (showAllChats ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6") + '"/></svg>');
-    more.addEventListener("click", function () {
-      showAllChats = !showAllChats; renderSessions();
-      if (!showAllChats) list.scrollTop = 0;
-      var again = list.querySelector(".more-chats"); if (again) again.focus();
-    });
+      + "M9 6l6 6-6 6" + '"/></svg>');
+    more.addEventListener("click", histOpen);
     return more;
   }
+  /* ---------- full chat history page (like Claude's "Chats" page), opened from "All chats" in the sidebar ---------- */
+  var hvw = null;
+  function ago(ms) {
+    var s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return "just now";
+    var m = Math.floor(s / 60); if (m < 60) return m + (m === 1 ? " minute ago" : " minutes ago");
+    var h = Math.floor(m / 60); if (h < 24) return h + (h === 1 ? " hour ago" : " hours ago");
+    var d = Math.floor(h / 24); if (d < 30) return d + (d === 1 ? " day ago" : " days ago");
+    var mo = Math.floor(d / 30); if (mo < 12) return mo + (mo === 1 ? " month ago" : " months ago");
+    var y = Math.floor(d / 365); return y + (y === 1 ? " year ago" : " years ago");
+  }
+  function histGroup(ms) {
+    var n = new Date(), t0 = new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime(), D = 86400000;
+    if (!ms) return "Older";
+    if (ms >= t0) return "Today";
+    if (ms >= t0 - D) return "Yesterday";
+    if (ms >= t0 - 6 * D) return "Previous 7 days";
+    if (ms >= t0 - 29 * D) return "Previous 30 days";
+    return "Older";
+  }
+  function histRender() {
+    if (!hvw) return;
+    var q = hvw.q.value.trim().toLowerCase(), list = hvw.list;
+    var rows = sessions.filter(function (s) { return !q || (s.title || "").toLowerCase().indexOf(q) >= 0; });
+    hvw.count.textContent = q ? rows.length + " of " + sessions.length + " chats" : sessions.length + (sessions.length === 1 ? " chat" : " chats");
+    list.textContent = "";
+    if (!rows.length) {
+      var e = document.createElement("div"); e.className = "hv-empty";
+      e.textContent = sessions.length ? "No chats match your search." : "No chats yet. Start one and it shows up here.";
+      list.appendChild(e); return;
+    }
+    var lastGroup = "";
+    rows.forEach(function (s, i) {
+      var title = s.title || "New chat", ms = s.updated ? s.updated / 1e6 : 0, g = histGroup(ms);
+      if (g !== lastGroup) {
+        lastGroup = g;
+        var gh = document.createElement("div"); gh.className = "hv-group"; gh.textContent = g; list.appendChild(gh);
+      }
+      var r = document.createElement("div");
+      r.className = "hv-row" + (s.id === currentId ? " active" : ""); r.tabIndex = 0; r.setAttribute("role", "button");
+      r.setAttribute("aria-label", title);
+      r.style.animationDelay = Math.min(i, 12) * 18 + "ms";
+      var main = document.createElement("div"); main.className = "hv-main";
+      var t = document.createElement("span"); t.className = "hv-title"; t.textContent = title; t.title = title;
+      var tm = document.createElement("span"); tm.className = "hv-time";
+      tm.textContent = ms ? "Last message " + ago(ms) : "";
+      main.appendChild(t); main.appendChild(tm);
+      r.appendChild(main);
+      if (running[s.id]) { var dot = document.createElement("i"); dot.className = "hv-dot"; dot.title = "Aura is working on this chat"; r.appendChild(dot); }
+      var del = document.createElement("button"); del.type = "button"; del.className = "hv-del"; del.textContent = "×";
+      del.title = "Delete chat"; del.setAttribute("aria-label", "Delete chat " + title);
+      del.addEventListener("click", function (ev) { ev.stopPropagation(); deleteChat(s); });
+      r.appendChild(del);
+      function go() { var id = s.id; histClose(true); if (id !== currentId) openSession(id); else focusInput(); }
+      r.addEventListener("click", go);
+      r.addEventListener("keydown", function (ev) { if (ev.target === r && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); go(); } });
+      list.appendChild(r);
+    });
+  }
+  function histOpen() {
+    if (hvw) { hvw.q.focus(); return; }
+    var main = $("main"); if (!main) return;
+    var el = document.createElement("div"); el.id = "histView"; el.setAttribute("role", "region"); el.setAttribute("aria-label", "Chat history");
+    el.innerHTML = '<div class="hv-in"><div class="hv-head"><h2>Chats</h2><button type="button" class="hv-new">+ New chat</button>' +
+      '<button type="button" class="hv-x" aria-label="Close history" title="Close (Esc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>' +
+      '<label class="hv-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>' +
+      '<input class="hv-q" type="text" placeholder="Search your chats..." spellcheck="false" autocomplete="off" aria-label="Search your chats"></label>' +
+      '<div class="hv-count" role="status"></div><div class="hv-list"></div></div>';
+    main.appendChild(el);
+    hvw = { el: el, q: el.querySelector(".hv-q"), list: el.querySelector(".hv-list"), count: el.querySelector(".hv-count") };
+    el.querySelector(".hv-x").addEventListener("click", function () { histClose(); });
+    el.querySelector(".hv-new").addEventListener("click", function () { histClose(true); if (api) newChat().then(focusInput); });
+    hvw.q.addEventListener("input", histRender);
+    el.addEventListener("keydown", function (e) {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      var items = [hvw.q].concat(Array.prototype.slice.call(hvw.list.querySelectorAll(".hv-row")));
+      var i = items.indexOf(document.activeElement); if (i < 0) return;
+      e.preventDefault();
+      var n = Math.max(0, Math.min(items.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
+      items[n].focus();
+    });
+    histRender();
+    refreshSessions(); // fresh list and times
+    hvw.q.focus();
+  }
+  function histClose(keepFocus) {
+    if (!hvw) return;
+    hvw.el.remove(); hvw = null;
+    if (!keepFocus && !document.querySelector(".modal-back")) focusInput();
+  }
+  var searchBtn = $("searchChat");
+  if (searchBtn) searchBtn.addEventListener("click", function () { if (!api) { toast("One moment, still loading."); return; } histOpen(); });
+  document.addEventListener("keydown", function (e) { /* Ctrl+K: search your chats */
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === "k" || e.key === "K")) {
+      e.preventDefault();
+      if (api && !document.querySelector(".modal-back")) histOpen();
+    }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (!hvw || e.key !== "Escape" || document.querySelector(".modal-back")) return;
+    e.preventDefault(); e.stopPropagation(); /* Esc closes the history first; it must not stop a running answer */
+    if (document.activeElement === hvw.q && hvw.q.value) { hvw.q.value = ""; histRender(); } else histClose();
+  }, true);
   function deleteChat(s) {
     var text = "“" + (s.title || "New chat") + "” and all its messages will be removed. This can’t be undone.";
     if (running[s.id]) text = "Aura is still working on this chat; that work stops. " + text;
@@ -532,6 +693,7 @@
     return api.list_sessions().then(function (list) {
       sessions = list || [];
       renderSessions();
+      histRender();
     }).catch(function () { toast("Could not load your chats."); });
   }
   /* A saved message. The internal [Who] tag is dropped; [App] = an error Aura showed, [Note] = "Stopped." */
@@ -544,6 +706,7 @@
   /* Open a chat. If it is still working (maybe started before you switched away), its live state comes back:
      text so far, step lines and the running timer. The work of the chat you leave keeps going. */
   function openSession(id) {
+    histClose(true);
     if (view) view.detach();
     currentId = id;
     messagesEl.textContent = "";
@@ -561,6 +724,7 @@
     }).then(function () { if (currentId === id) messagesEl.classList.remove("loading"); });
   }
   function newChat() {
+    histClose(true);
     return api.new_session().then(function (id) {
       if (!id) throw new Error("no id");
       if (view) view.detach();
@@ -737,6 +901,8 @@
 
   function send() {
     var text = input.value.trim();
+    /* nothing typed on an empty chat: Send / Enter sends the idea shown in the box */
+    if (!text && !pics.length && !docs.length && emptyIdea && !messagesEl.querySelector(".msg")) text = emptyIdea.replace(/\.{3}$/, "");
     if ((!text && !pics.length && !docs.length) || busy) return;
     if (!api || !currentId) { toast("One moment, the chat is still loading."); return; }
     var images = pics.slice(), files = docs.slice(), shown = text;
@@ -755,6 +921,7 @@
       ub.insertBefore(im, ub.firstChild);
     });
     startWork(currentId, mode, text, images);
+    setTimeout(refreshSessions, 700); // the chat is listed once its first message is saved
   }
   /* Aura mode streams from the chat's own background process; the other modes run as a background job.
      Either way the answer is saved into THIS chat, even if you switch to another one meanwhile. */
@@ -1006,7 +1173,7 @@
   function navigate(u, push) {
     u = unwrapBing(u);
     var seq = ++navSeq;
-    setPaneOpen(true); curUrl = u;
+    setPaneOpen(true); curUrl = u; syncSiteBar();
     if (push !== false) { hist = hist.slice(0, hpos + 1); hist.push(u); hpos = hist.length - 1; }
     updNav();
     $("pvAddr").value = cleanUrl(u);
@@ -1054,6 +1221,54 @@
     setPaneOpen(true); setTimeout(function () { $("pvAddr").focus(); }, 60);
   }
   function closeBrowser() { navSeq++; ovHide(); setLoading(false); setPaneOpen(false); }
+
+  /* ---------- preview tools: shown while a website Aura built is open (screen size, auto-reload) ---------- */
+  var DEVS = [
+    ["phone", "Phone", '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7.5" y="3" width="9" height="18" rx="2"/><path d="M11 18h2"/></svg>'],
+    ["tablet", "Tablet", '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M11 18h2"/></svg>'],
+    ["desktop", "Desktop", '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 17v3"/></svg>']
+  ];
+  var autoReload = true;
+  try { autoReload = localStorage.getItem("auraAutoReload") !== "off"; } catch (x) { /* ignore */ }
+  function setDevice(d) {
+    pane.dataset.dev = d;
+    Array.prototype.forEach.call(pane.querySelectorAll(".ps-dev button"), function (b) {
+      var on = b.dataset.dev === d; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  }
+  function buildSiteBar() {
+    var bar = document.createElement("div"); bar.className = "pv-site"; bar.setAttribute("role", "toolbar"); bar.setAttribute("aria-label", "Preview tools");
+    var html = '<span class="ps-kick">PREVIEW</span><span class="ps-name" id="psName"></span><span class="ps-fill"></span><div class="ps-dev" role="group" aria-label="Screen size">';
+    DEVS.forEach(function (d) { html += '<button type="button" data-dev="' + d[0] + '" title="' + d[1] + ' size" aria-label="' + d[1] + ' size" aria-pressed="false">' + d[2] + '</button>'; });
+    html += '</div><button type="button" class="ps-auto" id="psAuto" title="Reload by itself when the site changes"><i aria-hidden="true"></i><span>Auto</span></button>';
+    bar.innerHTML = html;
+    pane.insertBefore(bar, pane.querySelector(".pv-body"));
+    Array.prototype.forEach.call(bar.querySelectorAll(".ps-dev button"), function (b) { b.addEventListener("click", function () { setDevice(b.dataset.dev); }); });
+    var auto = bar.querySelector("#psAuto");
+    function paintAuto() { auto.setAttribute("aria-pressed", autoReload ? "true" : "false"); }
+    auto.addEventListener("click", function () {
+      autoReload = !autoReload; paintAuto();
+      try { localStorage.setItem("auraAutoReload", autoReload ? "on" : "off"); } catch (x) { /* ignore */ }
+      toast(autoReload ? "Preview reloads by itself when the site changes." : "Auto reload is off.");
+    });
+    paintAuto(); setDevice("desktop");
+  }
+  function syncSiteBar() {
+    var on = !!showingSite();
+    pane.classList.toggle("is-site", on);
+    var n = $("psName");
+    if (on && n && lastSite && lastSite.path) {
+      var parts = String(lastSite.path).split(/[\\/]/);
+      n.textContent = parts.slice(-2).join("/"); n.title = lastSite.path;
+    }
+  }
+  buildSiteBar();
+  setInterval(function () { /* only reloads THIS site, and only when its file really changed */
+    if (!autoReload || !api || !paneOpen() || !showingSite() || document.hidden || siteCheckBusy) return;
+    api.site_check(lastSite.mtime + 0.001).then(function (r) {
+      if (r && r.found && lastSite && r.path === lastSite.path && r.mtime !== lastSite.mtime) showSite(r);
+    }).catch(noop);
+  }, 3000);
 
   $("pvBack").addEventListener("click", function () { if (hpos > 0) { hpos--; navigate(hist[hpos], false); } });
   $("pvFwd").addEventListener("click", function () { if (hpos < hist.length - 1) { hpos++; navigate(hist[hpos], false); } });

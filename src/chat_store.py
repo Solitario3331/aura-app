@@ -90,7 +90,26 @@ def load_session(d, sid: str) -> dict:
     return {"id": data["id"], "title": data["title"], "messages": data["messages"]}
 
 
-def list_sessions(d) -> list:
+def empty_session_ids(d) -> list:
+    """Ids of saved chats that have no messages at all (nothing worth keeping)."""
+    p = Path(d)
+    if not p.exists() or not p.is_dir():
+        return []
+    out = []
+    for f in p.iterdir():
+        if not f.is_file() or f.suffix != ".json" or not f.stem.isalnum():
+            continue
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        if isinstance(data, dict) and not data.get("messages"):
+            out.append(f.stem)
+    return out
+
+
+def list_sessions(d, include_empty=True, with_time=False) -> list:
     p = Path(d)
     if not p.exists() or not p.is_dir():
         return []
@@ -106,6 +125,8 @@ def list_sessions(d) -> list:
                 data = json.load(fh)
         except Exception:
             continue
+        if not include_empty and not data.get("messages"):
+            continue
         updated = data.get("updated")
         created = data.get("created")
         if updated is None or created is None:
@@ -114,6 +135,8 @@ def list_sessions(d) -> list:
             created = mtime_ns
         items.append({"id": sid, "title": data.get("title", "New chat"), "_u": updated, "_c": created})
     items.sort(key=lambda x: (x["_u"], x["_c"]), reverse=True)
+    if with_time:
+        return [{"id": x["id"], "title": x["title"], "updated": x["_u"]} for x in items]
     return [{"id": x["id"], "title": x["title"]} for x in items]
 
 

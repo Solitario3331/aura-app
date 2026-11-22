@@ -13,8 +13,13 @@
 
   <!-- Left: chats -->
   <aside id="sidebar" aria-label="Chats">
-    <div class="brand"><div class="brand-text"><strong>AURA</strong><small>Online</small></div></div>
-    <button id="newChat" type="button">+ New chat</button>
+    <div class="side-head">
+      <div class="brand"><div class="brand-text"><strong>AURA</strong><small>Online</small></div></div>
+      <div class="side-tools">
+        <button id="newChat" type="button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button id="searchChat" type="button" title="Search chats (Ctrl+K)" aria-label="Search chats"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg></button>
+      </div>
+    </div>
     <div class="label side-label" aria-hidden="true">Chats</div>
     <nav id="sessionList" aria-label="Chat history"></nav>
     <div class="foot">
@@ -36,7 +41,7 @@
       <div id="thumbs" aria-label="Pictures to send"></div>
       <div id="composer">
         <label for="input" class="sr-only">Message</label>
-        <div id="inputWrap"><textarea id="input" rows="1" placeholder="Message Aura... (paste or drop pictures)"></textarea><span class="prompt" id="tcaret" aria-hidden="true"></span></div>
+        <div id="inputWrap"><textarea id="input" rows="1" placeholder="Message Aura..."></textarea><span class="prompt" id="tcaret" aria-hidden="true"></span></div>
         <button id="attachBtn" class="round" type="button" title="Add picture" aria-label="Add picture"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="fileIn" accept="image/*" multiple hidden>
         <button id="sendBtn" class="round" type="button" title="Send (Enter)" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
         <button id="stopBtn" class="round" type="button" title="Stop (Esc)" aria-label="Stop"></button>
@@ -46,7 +51,7 @@
   </main>
 
   <!-- Right: browser pane -->
-  <aside id="preview" aria-label="Browser">
+  <aside id="preview" aria-label="Preview and browser">
     <div class="pv-bar">
       <button id="pvBack" type="button" title="Back" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
       <button id="pvFwd" type="button" title="Forward" aria-label="Forward"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
@@ -61,7 +66,7 @@
       <div class="pv-progress" aria-hidden="true"></div>
       <iframe id="pvFrame" hidden title="Web page" sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"></iframe>
       <div id="pvOverlayHost" hidden></div>
-      <div id="pvStart" class="pv-card"><span class="pv-kicker">BROWSER</span><p>Type an address or a search above.<br>Websites Aura builds open here by themselves.</p><button id="pvNewest" type="button">Open my newest website</button></div>
+      <div id="pvStart" class="pv-card"><span class="pv-kicker">PREVIEW</span><p>Nothing to preview yet.<br>Websites Aura builds show up here live. You can also type an address above.</p><button id="pvNewest" type="button">Open my newest website</button></div>
       <div id="pvBlocked" class="pv-card" hidden><span class="pv-kicker">BLOCKED BY THE SITE</span><strong>This site can't be shown inside Aura</strong><span id="pvBlockedUrl" class="pv-url2"></span><p>Some big sites refuse to load in a side pane. They work fine in their own window.</p><div class="pv-actions"><button id="pvBlockWin" type="button">Open in a browser window</button><button id="pvBlockExt" type="button">Open in my normal browser</button></div></div>
     </div>
   </aside>
@@ -69,7 +74,7 @@
 
   <!-- Window buttons (no native title bar) -->
   <div id="winctl">
-    <button id="paneToggle" type="button" title="Browser" aria-label="Show or hide the browser" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c3.2 3.4 3.2 13.6 0 17M12 3.5c-3.2 3.4-3.2 13.6 0 17"/></svg></button>
+    <button id="paneToggle" type="button" title="Preview &amp; browser" aria-label="Show or hide the preview" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c3.2 3.4 3.2 13.6 0 17M12 3.5c-3.2 3.4-3.2 13.6 0 17"/></svg></button>
     <button id="wcMin" type="button" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8"/></svg></button>
     <button id="wcMax" type="button" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5h7v7h-7z"/></svg></button>
     <button id="wcClose" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2L2 10"/></svg></button>

@@ -32,6 +32,7 @@
     <div class="side-head">
       <div class="brand"><div class="brand-text"><strong>Chat</strong><small>Online</small></div></div>
       <button id="newChat" type="button" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button id="searchChat" type="button" title="Search chats (Ctrl+K)" aria-label="Search chats"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg></button>
     </div>
     <div class="filter"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg><input id="chatFilter" type="text" spellcheck="false" autocomplete="off" placeholder="Filter conversations…" aria-label="Filter conversations"></div>
     <div class="label side-label" aria-hidden="true">Chats</div>
@@ -82,7 +83,7 @@
   </main>
 
   <!-- Right: browser pane, styled as the WORKSPACE panel -->
-  <aside id="preview" aria-label="Browser">
+  <aside id="preview" aria-label="Preview and browser">
     <div class="pv-head">
       <span class="pv-title">Workspace</span><span class="pv-tag">Main</span>
       <span class="pv-fill"></span>
@@ -91,7 +92,7 @@
       <button id="pvClose" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
     <div class="pv-tabs" role="tablist" aria-label="Workspace">
-      <span class="pv-tabbtn on" role="tab" aria-selected="true">Browser</span>
+      <span class="pv-tabbtn on" role="tab" aria-selected="true">Preview</span>
     </div>
     <div class="pv-bar">
       <button id="pvBack" type="button" title="Back" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
@@ -104,7 +105,7 @@
       <div class="pv-progress" aria-hidden="true"></div>
       <iframe id="pvFrame" hidden title="Web page" sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-modals"></iframe>
       <div id="pvOverlayHost" hidden></div>
-      <div id="pvStart" class="pv-card"><span class="pv-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c3.2 3.4 3.2 13.6 0 17M12 3.5c-3.2 3.4-3.2 13.6 0 17"/></svg></span><span class="pv-kicker">Browser</span><p>Type an address or a search above.<br>Websites Aura builds open here by themselves.</p><button id="pvNewest" type="button">Open my newest website</button></div>
+      <div id="pvStart" class="pv-card"><span class="pv-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c3.2 3.4 3.2 13.6 0 17M12 3.5c-3.2 3.4-3.2 13.6 0 17"/></svg></span><span class="pv-kicker">Preview</span><p>Nothing to preview yet.<br>Websites Aura builds show up here live. You can also type an address above.</p><button id="pvNewest" type="button">Open my newest website</button></div>
       <div id="pvBlocked" class="pv-card" hidden><span class="pv-kicker">Blocked by the site</span><strong>This site can't be shown inside Aura</strong><span id="pvBlockedUrl" class="pv-url2"></span><p>Some big sites refuse to load in a side pane. They work fine in their own window.</p><div class="pv-actions"><button id="pvBlockWin" type="button">Open in a browser window</button><button id="pvBlockExt" type="button">Open in my normal browser</button></div></div>
     </div>
   </aside>
@@ -112,7 +113,7 @@
 
   <!-- Window buttons (no native title bar) -->
   <div id="winctl">
-    <button id="paneToggle" type="button" title="Browser" aria-label="Show or hide the browser" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM15 5v14"/></svg></button>
+    <button id="paneToggle" type="button" title="Preview &amp; browser" aria-label="Show or hide the preview" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM15 5v14"/></svg></button>
     <button id="wcMin" type="button" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8"/></svg></button>
     <button id="wcMax" type="button" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5h7v7h-7z"/></svg></button>
     <button id="wcClose" type="button" title="Close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2L2 10"/></svg></button>

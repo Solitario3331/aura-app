@@ -619,16 +619,32 @@ class Api:
     def list_sessions(self) -> list:
         try:
             with _STORE:
-                return chat_store.list_sessions(CHATS_DIR)
+                return chat_store.list_sessions(CHATS_DIR, include_empty=False, with_time=True)
         except Exception as exc:
             _log("list_sessions failed: " + repr(exc))
             return []
 
+    def _purge_empty(self, keep="") -> None:
+        """Chats with no messages are never kept: delete them (except `keep` and anything still working)."""
+        try:
+            with _STORE:
+                empties = chat_store.empty_session_ids(CHATS_DIR)
+            if not empties:
+                return
+            busy = set(self.busy_chats())
+            for sid in empties:
+                if sid != keep and sid not in busy:
+                    self.delete_session(sid)
+        except Exception as exc:
+            _log("purge_empty failed: " + repr(exc))
+
     def new_session(self) -> str:
         """A new empty chat. Returns its id, or "" if it could not be created."""
         try:
+            self._purge_empty()                  # the empty chat you leave behind is never kept
             with _STORE:
-                return chat_store.new_session(CHATS_DIR)
+                sid = chat_store.new_session(CHATS_DIR)
+            return sid
         except Exception as exc:
             _log("new_session failed: " + repr(exc))
             return ""
@@ -708,6 +724,7 @@ class Api:
             for s in self.list_sessions():
                 if self.delete_session(s.get("id")):
                     n += 1
+            self._purge_empty()
         except Exception as exc:
             _log("delete_all_sessions failed: " + repr(exc))
         return n
