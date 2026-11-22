@@ -552,7 +552,7 @@
   function renderSessions() {
     var list = $("sessionList"), frag = document.createDocumentFragment();
     var lbl = document.querySelector(".side-label");
-    if (lbl) lbl.textContent = sessions.length ? "Chats · " + sessions.length : "Chats";
+    if (lbl) lbl.textContent = "Chats";
     if (!sessions.length) {
       var e = document.createElement("div");
       e.className = "empty"; e.textContent = "No chats yet";
@@ -574,7 +574,7 @@
     more.setAttribute("aria-haspopup", "dialog");
     more.title = "Open the full chat history";
     var label = document.createElement("span");
-    label.textContent = "All chats (" + sessions.length + ")";
+    label.textContent = "All chats";
     more.appendChild(label);
     more.insertAdjacentHTML("beforeend", '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="'
       + "M9 6l6 6-6 6" + '"/></svg>');
