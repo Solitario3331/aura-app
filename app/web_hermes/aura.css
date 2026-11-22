@@ -842,3 +842,20 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
 
 /* the Details block under a finished answer is a normal block: it must not stretch to a full screen (that left a big gap) */
 #messages > .dt-root { flex: 0 0 auto; align-self: stretch; margin-top: 0; }
+
+/* start page, compact and neat */
+#main.is-empty .wl-wordmark { font-size: clamp(40px, 6vw, 64px); margin-bottom: 14px; }
+.wl-title { gap: 4px; }
+.wl-hi { font-size: 20px; }
+.wl-sub { font-size: 14px; }
+#main.is-empty #messages:empty:not(.loading) + #welcome { padding-bottom: 18px; }
+#main.is-empty #composer { padding: 12px 12px 10px 16px; }
+#main.is-empty #input { min-height: 40px; font-size: 15px; }
+#main.is-empty #startChips { margin-top: 16px; gap: 8px; }
+.start-chip { height: 30px; padding: 0 12px; font-size: 12.5px; }
+.start-chip svg { width: 14px; height: 14px; }
+
+/* first page: just the question, no "Good evening" */
+.wl-hi { display: none; }
+.wl-sub { font-size: 16px; color: var(--mute); }
+#main.is-empty .wl-wordmark { font-size: clamp(36px, 5vw, 56px); margin-bottom: 16px; }

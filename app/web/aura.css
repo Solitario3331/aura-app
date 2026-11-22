@@ -892,3 +892,28 @@ body.calm #messages.intro ~ #composerWrap #startGreet, body.calm #messages.intro
 
 /* the Details block under a finished answer is a normal block: it must not stretch to a full screen (that left a big gap) */
 #messages > .dt-root { flex: 0 0 auto; align-self: stretch; margin-top: 0; }
+
+/* start page, compact and neat: AURA, typing line, one-line greeting, a smaller box, small idea buttons */
+#main.is-empty #messages:empty::before { font-size: 22px; text-shadow: 0 0 26px rgba(71,71,255,.35); }
+#main.is-empty #messages:empty::after { display: block; margin: 12px auto 0; }
+#main.is-empty #startGreet { margin: 16px 0 22px; }
+#startGreet h1, #startGreet p { display: inline; font-family: var(--sans); font-size: 16px; line-height: 1.4; letter-spacing: 0; }
+#startGreet h1 { font-weight: 500; color: var(--hi); }
+#startGreet h1::after { content: "."; }
+#startGreet p { margin: 0 0 0 .35em; color: var(--mute); }
+#main.is-empty #composer { min-height: 76px; padding: 11px 10px 10px 16px; box-shadow: 0 16px 44px -22px rgba(71,71,255,.4), inset 0 0 0 1px rgba(255,255,255,.02); }
+#main.is-empty #input { min-height: 38px; font-size: 15px; }
+#main.is-empty .mode-row { margin-bottom: 8px; }
+#main.is-empty #startChips { margin-top: 16px; gap: 8px; }
+.start-chip { height: 28px; padding: 0 12px; gap: 7px; font-size: 10.5px; }
+.start-chip svg { width: 13px; height: 13px; }
+
+/* first page wordmark: bigger, in the same techno font as the loading screen, with a faint neon edge */
+#main.is-empty #messages:empty::before { font-family: "Chakra Petch", "Orbitron", var(--mono); font-weight: 700; font-size: clamp(56px, 6.6vw, 88px);
+  line-height: 1; letter-spacing: .22em; padding-left: .22em; text-shadow: 2px 0 rgba(255,42,109,.5), -2px 0 rgba(5,217,232,.5), 0 0 42px rgba(71,71,255,.55); }
+#main.is-empty #messages:empty::after { margin-top: 18px; }
+
+/* first page: medium AURA, no greeting, "AWAITING INPUT_" is the main line */
+#startGreet { display: none !important; }
+#main.is-empty #messages:empty::before { font-size: clamp(34px, 3.6vw, 44px); letter-spacing: .24em; padding-left: .24em; text-shadow: 1px 0 rgba(255,42,109,.45), -1px 0 rgba(5,217,232,.45), 0 0 28px rgba(71,71,255,.45); }
+#main.is-empty #messages:empty::after { margin: 16px auto 30px; font-size: 13px; color: var(--mute); }
