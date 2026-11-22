@@ -118,10 +118,9 @@
   var calmMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
   var MODES = [
-    { id: "claude", label: "Aura", tip: "Aura does it all" },
-    { id: "auto", label: "Quick", tip: "Fast and free, Aura helps if needed" },
+    { id: "claude", label: "Aura", tip: "Smart and thorough: Aura plans and hands the work to the helper" },
+    { id: "auto", label: "Quick", tip: "Fast, no thinking: Aura hands the work to the helper" },
     { id: "qwen", label: "Local", tip: "Runs only on this PC, free" },
-    { id: "big", label: "Big project", tip: "Aura plans and builds big things" },
     { id: "polish", label: "Polish", tip: "Aura makes the website of this chat look great" }
   ];
   var mode = "claude";
@@ -141,11 +140,22 @@
 
   /* Scrolling: follow new text only while the user is at the bottom. */
   var stick = true;
-  messagesEl.addEventListener("scroll", function () {
-    stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  messagesEl.addEventListener("scroll", function () { /* follow new text only while you are (almost) at the bottom */
+    stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 32;
   }, { passive: true });
+  messagesEl.addEventListener("wheel", function (e) { if (e.deltaY < 0) stick = false; }, { passive: true }); /* scrolling up = stop following at once */
+  messagesEl.addEventListener("touchmove", function () { stick = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 32; }, { passive: true });
   function scrollDown(force) {
     if (force || stick) { messagesEl.scrollTop = messagesEl.scrollHeight; stick = true; }
+  }
+  /* Following an answer: keep scrolling while it is short, but never past its START, so you can read it from the top. */
+  function followAnswer(el) {
+    if (!stick || !el) return;
+    var box = (el.closest && el.closest(".msg")) || el;
+    var bottom = messagesEl.scrollHeight - messagesEl.clientHeight;
+    var topLimit = messagesEl.scrollTop + (box.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top) - 16;
+    var target = Math.min(bottom, topLimit);
+    if (target > messagesEl.scrollTop) messagesEl.scrollTop = target;
   }
 
   /* ---------- rich text (markdown-lite; builds DOM nodes, never innerHTML) ---------- */
@@ -426,7 +436,7 @@
       wrap.appendChild(acts);
     }
     messagesEl.appendChild(wrap);
-    scrollDown(role === "user");
+    if (role === "user") scrollDown(true); else followAnswer(b);
     return b;
   }
   function addChip(text) {
@@ -474,11 +484,13 @@
     messagesEl.appendChild(w);
     scrollDown();
 
-    var cur = STATUS[phase] ? phase : "think", idx = -1, last = "", t0 = Date.now() - (sinceMs || 0), gi = 4, ticks = 0, nextWord = 0;
+    var cur = STATUS[phase] ? phase : "think", idx = -1, last = "", t0 = Date.now() - (sinceMs || 0), gi = 4, ticks = 0, nextWord = 0, fixed = "";
     function pick() {
+      if (fixed) { v.textContent = fixed + "…"; nextWord = Date.now() + 3200; return; } // a specific step is shown
       var list = STATUS[cur] || STATUS.think, word;
       if (list.seq) { idx = Math.min(idx + 1, list.words.length - 1); word = list.words[idx]; }
       else { do { word = list.words[Math.floor(Math.random() * list.words.length)]; } while (word === last && list.words.length > 1); }
+      if (cur === "think" && thinkIsOff()) word = "Working";
       last = word; v.textContent = word + "…";
       nextWord = Date.now() + 3200 + Math.random() * 1200;
     }
@@ -497,7 +509,8 @@
     }, calmMotion ? 1000 : 140);
     return {
       el: w,
-      phase: function (p) { if (p === "act") p = "work"; if (p !== cur && STATUS[p]) { cur = p; idx = -1; pick(); } },
+      phase: function (p) { if (p === "act") p = "work"; if (p !== cur && STATUS[p]) { cur = p; idx = -1; fixed = ""; pick(); } },
+      say: function (text) { fixed = String(text || ""); pick(); },
       stop: function () { clearInterval(timer); if (stopLoader) stopLoader(); w.remove(); }
     };
   }
@@ -536,7 +549,7 @@
     var t0 = Date.now() - (sinceMs || 0);
     function secs() { return Math.floor((Date.now() - t0) / 1000); }
     function paint() {
-      var txt = showStep ? latest : PG_PHASE[cur] + "…";
+      var txt = showStep ? latest : ((cur === "think" && thinkIsOff()) ? "Working" : PG_PHASE[cur]) + "…";
       if (t.textContent !== txt) t.textContent = txt;
     }
     function meta() {
@@ -764,7 +777,7 @@
     main.appendChild(el);
     hvw = { el: el, q: el.querySelector(".hv-q"), list: el.querySelector(".hv-list"), count: el.querySelector(".hv-count") };
     el.querySelector(".hv-x").addEventListener("click", function () { histClose(); });
-    el.querySelector(".hv-new").addEventListener("click", function () { histClose(true); if (api) newChat().then(focusInput); });
+    el.querySelector(".hv-new").addEventListener("click", function () { histClose(true); if (api) newChat().then(freshStart); });
     hvw.q.addEventListener("input", histRender);
     el.addEventListener("keydown", function (e) {
       if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
@@ -847,6 +860,253 @@
     }).catch(function () {
       if (currentId === id) addBubble("assistant", "This chat could not be opened.", "error");
     }).then(function () { if (currentId === id) messagesEl.classList.remove("loading"); }); // an older, slower load must not end a newer one
+  }
+  /* ---------- slash commands (like the terminal): type / to see them ---------- */
+  var SLASH = [
+    { n: "btw", a: "<question>", d: "Ask a quick side question. Your chat and any running work stay untouched.", args: true },
+    { n: "new", al: ["clear"], d: "Start a new chat" },
+    { n: "mode", a: "aura | quick | local | polish", d: "Switch mode", args: true },
+    { n: "think", al: ["effort"], a: "off | low | medium | high", d: "Change how much Aura thinks", args: true },
+    { n: "chats", al: ["resume", "search"], d: "Open your chat history" },
+    { n: "copy", d: "Copy Aura's last answer" },
+    { n: "export", d: "Save this chat as a file" },
+    { n: "preview", d: "Open or close the preview" },
+    { n: "settings", d: "Open settings" },
+    { n: "stop", d: "Stop what Aura is doing" },
+    { n: "help", d: "Show all commands" }
+  ];
+  function slashFind(name) {
+    name = String(name).toLowerCase();
+    for (var i = 0; i < SLASH.length; i++) { var c = SLASH[i]; if (c.n === name || (c.al && c.al.indexOf(name) >= 0)) return c; }
+    return null;
+  }
+
+  /* a small card above the box (used by /btw and /help); it is not part of the chat */
+  var cardEl = null;
+  function cardClose() { if (cardEl) { cardEl.remove(); cardEl = null; } }
+  function showCard(title, build) {
+    cardClose();
+    var wrap = $("composerWrap"); if (!wrap) return null;
+    var c = document.createElement("div"); c.className = "side-card"; c.setAttribute("role", "region"); c.setAttribute("aria-label", title);
+    var h = document.createElement("div"); h.className = "sc-head";
+    var tt = document.createElement("span"); tt.textContent = title;
+    var x = document.createElement("button"); x.type = "button"; x.className = "sc-x"; x.textContent = "×"; x.title = "Close"; x.setAttribute("aria-label", "Close");
+    x.addEventListener("click", function () { cardClose(); focusInput(); });
+    h.appendChild(tt); h.appendChild(x);
+    var body = document.createElement("div"); body.className = "sc-body"; build(body);
+    c.appendChild(h); c.appendChild(body);
+    wrap.insertBefore(c, wrap.firstChild); cardEl = c;
+    return body;
+  }
+  function btwAsk(q) {
+    if (!api || !api.btw) { toast("One moment, still loading."); return; }
+    var body = showCard("BTW · side question", function (b) {
+      var qq = document.createElement("div"); qq.className = "sc-q"; qq.textContent = q;
+      var aa = document.createElement("div"); aa.className = "sc-a wait"; aa.textContent = "One moment";
+      b.appendChild(qq); b.appendChild(aa);
+    });
+    if (!body) return;
+    var ans = body.querySelector(".sc-a"), mine = cardEl;
+    api.btw(currentId, q).then(function (r) {
+      if (cardEl !== mine) return;
+      ans.classList.remove("wait");
+      if (r && r.ok) renderRich(ans, r.text || "No answer."); else ans.textContent = (r && r.error) || "Could not answer right now.";
+    }).catch(function () { if (cardEl === mine) { ans.classList.remove("wait"); ans.textContent = "Could not answer right now."; } });
+  }
+  function helpCard() {
+    showCard("Commands", function (b) {
+      SLASH.forEach(function (c) {
+        var row = document.createElement("div"); row.className = "sc-row";
+        var n = document.createElement("span"); n.className = "sl-n"; n.textContent = "/" + c.n + (c.a ? " " + c.a : "");
+        var d = document.createElement("span"); d.className = "sl-d2"; d.textContent = c.d;
+        row.appendChild(n); row.appendChild(d); b.appendChild(row);
+      });
+    });
+  }
+  var SLASH_RUN = {
+    btw: function (q) { btwAsk(q); },
+    "new": function () { if (!api) { toast("One moment, still loading."); return; } newChat().then(freshStart); },
+    mode: function (arg) {
+      var id = { aura: "claude", quick: "auto", local: "qwen", polish: "polish" }[String(arg).toLowerCase()], picked = null;
+      MODES.forEach(function (m) { if (m.id === id) picked = m; });
+      if (!picked) { toast("Modes: aura, quick, local, polish."); return; }
+      setMode(picked); toast("Mode: " + picked.label + ".");
+    },
+    think: function (arg) {
+      var lv = String(arg).toLowerCase();
+      if (mode === "auto") { toast("Quick never thinks."); return; }
+      if (mode === "polish") { toast("Polish always works at full strength."); return; }
+      if (THINK_STEPS.indexOf(lv) < 0) { toast("Thinking is " + thinkLevel + ". Use /think off, low, medium or high."); return; }
+      thinkLevel = lv;
+      try { localStorage.setItem("auraThink", lv); } catch (e) { /* ignore */ }
+      paintThink(); pushThink(); toast("Thinking: " + lv + ".");
+    },
+    chats: function () { histOpen(); },
+    copy: function () {
+      var all = messagesEl.querySelectorAll(".msg.assistant .bubble:not(.error):not(.note)"), b = all[all.length - 1];
+      if (!b) { toast("Nothing to copy yet."); return; }
+      copyText(rawOf(b)).then(function () { toast("Copied Aura's last answer."); });
+    },
+    "export": function () {
+      if (!api || !currentId) { toast("Open a chat first."); return; }
+      api.export_chat(currentId).then(function (r) { toast((r && r.status) || "Could not save the chat."); }).catch(function () { toast("Could not save the chat."); });
+    },
+    preview: function () { $("paneToggle").click(); },
+    settings: function () { openSettings(); },
+    stop: function () { if (stopFn) stopFn(); else toast("Nothing is running."); },
+    help: function () { helpCard(); }
+  };
+  function slashGuess(name) { // closest command: starts the same way, or is one or two letters away
+    name = String(name).toLowerCase();
+    function dist(a, b) {
+      var d = [], i, j;
+      for (i = 0; i <= a.length; i++) { d[i] = [i]; }
+      for (j = 1; j <= b.length; j++) { d[0][j] = j; }
+      for (i = 1; i <= a.length; i++) for (j = 1; j <= b.length; j++)
+        d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      return d[a.length][b.length];
+    }
+    var best = null, bestD = 99;
+    SLASH.forEach(function (c) {
+      [c.n].concat(c.al || []).forEach(function (w) {
+        var k = (name.indexOf(w) === 0 || w.indexOf(name) === 0) ? 1 : dist(name, w);
+        if (k < bestD) { bestD = k; best = c; }
+      });
+    });
+    return bestD <= 2 ? best : null;
+  }
+  /* returns true when the text was a command (it is then never sent as a message) */
+  function slashRun(text) {
+    var m = /^\/([A-Za-z]+)(?:\s+([\s\S]*))?$/.exec(text);
+    if (!m) return false; // "/usr/bin ..." and normal text go through as messages
+    var c = slashFind(m[1]), arg = (m[2] || "").trim();
+    if (!c) {
+      var g = slashGuess(m[1]);
+      toast("Unknown command /" + m[1] + "." + (g ? " Did you mean /" + g.n + "?" : " Type /help to see them."));
+      return true;
+    }
+    if (c.n === "btw" && !arg) { toast("Type your question after /btw, like: /btw what does that mean?"); return true; }
+    input.value = ""; autoGrow(); slashHide();
+    SLASH_RUN[c.n](arg);
+    return true;
+  }
+
+  /* the menu that opens while you type "/" */
+  var slashEl = null, slashItems = [], slashSel = 0;
+  function slashHide() { if (slashEl) { slashEl.remove(); slashEl = null; } slashItems = []; slashSel = 0; }
+  function slashPick(c) { // fills the command; runs it straight away when it needs no extra words
+    if (c.args) { input.value = "/" + c.n + " "; input.dispatchEvent(new Event("input")); focusInput(); }
+    else { input.value = "/" + c.n; slashHide(); send(); }
+  }
+  function slashShow() {
+    var m = /^\/([A-Za-z]*)$/.exec(input.value);
+    if (!m) { slashHide(); return; }
+    var q = m[1].toLowerCase();
+    slashItems = SLASH.filter(function (c) { return !q || c.n.indexOf(q) === 0 || (c.al || []).some(function (a) { return a.indexOf(q) === 0; }); });
+    if (!slashItems.length) { slashHide(); return; }
+    if (slashSel >= slashItems.length) slashSel = 0;
+    if (!slashEl) {
+      slashEl = document.createElement("div"); slashEl.id = "slashMenu"; slashEl.setAttribute("role", "listbox"); slashEl.setAttribute("aria-label", "Commands");
+      document.body.appendChild(slashEl);
+    }
+    slashEl.textContent = "";
+    slashItems.forEach(function (c, i) {
+      var row = document.createElement("div"); row.className = "sl-item" + (i === slashSel ? " sel" : ""); row.setAttribute("role", "option");
+      var n = document.createElement("span"); n.className = "sl-n"; n.textContent = "/" + c.n + (c.a ? " " + c.a : "");
+      var d = document.createElement("span"); d.className = "sl-d"; d.textContent = c.d;
+      row.appendChild(n); row.appendChild(d);
+      row.addEventListener("mousedown", function (e) { e.preventDefault(); slashPick(c); });
+      slashEl.appendChild(row);
+    });
+    var r = input.getBoundingClientRect();
+    slashEl.style.left = r.left + "px"; slashEl.style.width = r.width + "px"; slashEl.style.bottom = (window.innerHeight - r.top + 10) + "px";
+    var sel = slashEl.querySelector(".sel"); if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+  }
+  input.addEventListener("input", slashShow);
+  input.addEventListener("keydown", function (e) { // runs before the normal Enter handling
+    if (!slashEl) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault(); e.stopImmediatePropagation();
+      slashSel = (slashSel + (e.key === "ArrowDown" ? 1 : -1) + slashItems.length) % slashItems.length; slashShow();
+    } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.isComposing)) {
+      e.preventDefault(); e.stopImmediatePropagation(); slashPick(slashItems[slashSel]);
+    } else if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); slashHide(); }
+  }, true);
+  input.addEventListener("blur", function () { setTimeout(slashHide, 150); });
+  window.addEventListener("resize", slashHide);
+
+  /* ---------- empty chat: the box sits in the middle of the screen (like Claude) and moves down once you send ---------- */
+  (function () {
+    var mainEl = $("main"), wrap = $("composerWrap");
+    if (!mainEl || !wrap) return;
+    var lastTop = -1; // where the box sat in the layout before the chat changed (offsetTop ignores the glide itself)
+    function remember() { lastTop = wrap.offsetTop; }
+    function sync() {
+      var empty = messagesEl.childElementCount === 0 && !messagesEl.classList.contains("loading") && !(typeof termVisible === "function" && termVisible());
+      if (empty === mainEl.classList.contains("is-empty")) return;
+      var before = lastTop >= 0 ? lastTop : wrap.offsetTop;
+      mainEl.classList.toggle("is-empty", empty);
+      var after = wrap.offsetTop;
+      lastTop = after;
+      var d = before - after;
+      if (calmMotion || !d) return;
+      wrap.style.transition = "none"; wrap.style.transform = "translateY(" + d + "px)";
+      void wrap.offsetWidth;
+      wrap.style.transition = "transform .45s cubic-bezier(.2,.7,.2,1)"; wrap.style.transform = "";
+      setTimeout(function () { wrap.style.transition = ""; }, 520);
+    }
+    if (window.MutationObserver) new MutationObserver(sync).observe(messagesEl, { childList: true, attributes: true, attributeFilter: ["class"] });
+    if (window.ResizeObserver) new ResizeObserver(function () { if (!wrap.style.transition) remember(); }).observe(mainEl);
+    window.addEventListener("resize", remember);
+    sync(); remember();
+  })();
+
+  /* ---------- start page: greeting + a few ideas under the box (like Claude's home screen) ---------- */
+  var STARTS = [
+    { label: "Build", text: "Build me a website about ", icon: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/>' },
+    { label: "Learn", text: "Explain to me in simple words: ", icon: '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v15H5.5A1.5 1.5 0 0 0 4 20.5zM20 5.5A1.5 1.5 0 0 0 18.5 4H13v15h5.5a1.5 1.5 0 0 1 1.5 1.5z"/>' },
+    { label: "Organize", text: "Show me what is in my Downloads folder and help me tidy it up.", icon: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>' },
+    { label: "Write", text: "Help me write ", icon: '<path d="M4 20l1-4L16 5a2 2 0 0 1 3 3L8 19zM14 7l3 3"/>' },
+    { label: "Fix my PC", text: "My PC feels slow. Find out why and tell me what you see.", icon: '<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/>' }
+  ];
+  function greetWord() { var h = new Date().getHours(); return h < 5 ? "Hello" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; }
+  function paintGreeting() {
+    var g = $("startGreet"), t = document.querySelector(".wl-title");
+    if (g) g.querySelector("h1").textContent = greetWord();
+    if (t) {
+      t.textContent = "";
+      var a = document.createElement("span"); a.className = "wl-hi"; a.textContent = greetWord();
+      var b = document.createElement("span"); b.className = "wl-sub"; b.textContent = "What are we building today?";
+      t.appendChild(a); t.appendChild(b);
+    }
+  }
+  (function buildStartPage() {
+    var wrap = $("composerWrap"); if (!wrap || $("startGreet")) return;
+    var g = document.createElement("div"); g.id = "startGreet";
+    g.innerHTML = "<h1></h1><p>What are we building today?</p>";
+    wrap.insertBefore(g, wrap.firstChild);
+    var chips = document.createElement("div"); chips.id = "startChips"; chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Ideas");
+    STARTS.forEach(function (s) {
+      var b = document.createElement("button"); b.type = "button"; b.className = "start-chip";
+      b.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' + s.icon + "</svg>";
+      var l = document.createElement("span"); l.textContent = s.label; b.appendChild(l);
+      b.addEventListener("click", function () { putInInput(s.text); });
+      chips.appendChild(b);
+    });
+    wrap.appendChild(chips);
+    paintGreeting();
+  })();
+
+  /* A new chat looks like the first start: nothing left from the last chat, the opening screen plays again. */
+  var introT = 0;
+  function freshStart() {
+    cardClose(); paintGreeting();
+    try { if (paneOpen()) closeBrowser(); } catch (x) { /* ignore */ }
+    pics = []; docs = []; renderThumbs();
+    editing = false; input.value = ""; autoGrow();
+    messagesEl.classList.remove("intro"); void messagesEl.offsetWidth; messagesEl.classList.add("intro");
+    clearTimeout(introT); introT = setTimeout(function () { messagesEl.classList.remove("intro"); }, 1000);
+    focusInput();
   }
   function newChat() {
     histClose(true);
@@ -1005,7 +1265,7 @@
     var v = { sid: sid, kind: kind, live: false, lost: 0 };
     function flush() {
       raf = 0;
-      if (pending) { renderRich(pending.el, pending.text); scrollDown(); }
+      if (pending) { renderRich(pending.el, pending.text); followAnswer(pending.el); }
       pending = null;
     }
     function keepStatusLast() { // only move the bar when something came after it; keep an open log where it was
@@ -1024,7 +1284,7 @@
     }
     function dtResult(out) { if (dt && out) dt.result(out); }
     function newBubble() { cur = addBubble("assistant", ""); keepStatusLast(); }
-    function chip(it) { dtAdd(it); if (kind === "job") { st.step(it); return; } addChip(CHIP_PREFIX + (it.text || CHIP[it.kind] || "Completed a task")); cur = null; }
+    function chip(it) { dtAdd(it); if (kind === "job") { st.step(it); return; } if (st.say && it.text && !PG_FILLER.test(it.text)) st.say(it.text); cur = null; }
     function close(keepRunning) {
       if (finished) return false;
       finished = true; v.live = false;
@@ -1046,7 +1306,8 @@
       else if (e.note) addBubble("assistant", e.text || "Stopped.", "note");
       else if (e.error) addBubble("assistant", e.text || "Something went wrong. Please try again.", "error");
       else if (kind === "job") addBubble("assistant", e.text || "No answer.");
-      if (keepDt) { messagesEl.appendChild(keepDt); scrollDown(); }
+      if (keepDt) messagesEl.appendChild(keepDt);
+      if (cur && cur.parentNode) followAnswer(cur); else scrollDown(); // only moves while a short answer is being followed
       refreshSessions();
       if (!document.querySelector(".modal-back") && !termVisible()) focusInput();
     }
@@ -1057,7 +1318,7 @@
         if (!cur) newBubble();
         pending = { el: cur, text: e.text || "" };
         if (!raf) raf = requestAnimationFrame(flush);
-      } else if (e.t === "tool" || e.t === "step") { chip(e); st.phase(e.kind || "work"); keepStatusLast(); }
+      } else if (e.t === "tool" || e.t === "step") { st.phase(e.kind || "work"); chip(e); keepStatusLast(); }
       else if (e.t === "result") dtResult(e.out);
       else if (e.t === "phase") { if (!stopAsked) st.phase(e.kind || "think"); }
       else if (e.t === "done" || e.t === "closed") { finish(e); return true; }
@@ -1104,13 +1365,14 @@
 
   function send() {
     var text = input.value.trim();
+    if (text.charAt(0) === "/" && slashRun(text)) return; // a slash command, not a message
     /* nothing typed on an empty chat: Send / Enter sends the idea shown in the box */
     if (!text && !pics.length && !docs.length && emptyIdea && !messagesEl.querySelector(".msg")) text = emptyIdea.replace(/\.{3}$/, "");
     if ((!text && !pics.length && !docs.length) || busy) return;
     if (!api || !currentId) { toast("One moment, the chat is still loading."); return; }
     var images = pics.slice(), files = docs.slice(), shown = text;
     if (editing) { editing = false; if (text) { text = "(edited) " + text; shown = text; } }
-    if (images.length && (mode === "big" || mode === "polish")) { toast("Pictures work in Aura, Quick and Local modes."); return; }
+    if (images.length && mode === "polish") { toast("Pictures work in Aura, Quick and Local modes."); return; }
     pics = []; docs = []; renderThumbs();
     input.value = "";
     input.dispatchEvent(new Event("input")); // re-sizes the box and resets the send button colour
@@ -1130,10 +1392,10 @@
      Either way the answer is saved into THIS chat, even if you switch to another one meanwhile. */
   function startWork(sid, m, text, images) {
     pushThink();
-    var v = attachRun(sid, { kind: m === "claude" ? "aura" : "job", elapsed: 0, items: [],
-                             phase: m === "big" ? "big" : m === "polish" ? "polish" : (images.length ? "look" : "think") });
+    var v = attachRun(sid, { kind: (m === "claude" || m === "auto") ? "aura" : "job", elapsed: 0, items: [],
+                             phase: m === "polish" ? "polish" : (images.length ? "look" : "think") });
     var imgs = images.length ? images : null;
-    (m === "claude" ? api.chat_send(sid, text, imgs) : api.job_start(sid, text, m, imgs)).then(function (r) {
+    ((m === "claude" || m === "auto") ? api.chat_send(sid, text, imgs, m) : api.job_start(sid, text, m, imgs)).then(function (r) {
       if (!r || !r.ok) { v.fail((r && r.error) || "Aura could not start. Please try again."); return; }
       if (v.stopped()) api.chat_stop(sid).catch(noop); // Stop was pressed while it was starting
       v.start();
@@ -1145,6 +1407,7 @@
   /* ---------- thinking switch (Off / Low / Medium / High) ---------- */
   var THINK_STEPS = ["off", "low", "medium", "high"], thinkLevel = "medium";
   try { var tl0 = localStorage.getItem("auraThink"); if (THINK_STEPS.indexOf(tl0) >= 0) thinkLevel = tl0; } catch (e) {}
+  function thinkIsOff() { return mode === "auto" || (mode !== "polish" && thinkLevel === "off"); } // Quick never thinks; Off means off
   function paintThink() {
     var b = $("thinkBtn"); if (!b) return;
     var locked = mode === "auto" || mode === "polish";
@@ -1195,9 +1458,16 @@
 
   /* ---------- composer ---------- */
   function autoGrow() {
+    if (!input.value) { input.style.height = ""; return; } // empty: one row, whatever the hint text says
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 160) + "px";
   }
+  (function refitOnResize() { // the chat gets narrower/wider (preview, sidebar, window): measure the text again
+    var wrap = $("inputWrap"), lastW = 0;
+    function check() { var w = wrap ? wrap.clientWidth : 0; if (w && w !== lastW) { lastW = w; autoGrow(); } }
+    if (window.ResizeObserver && wrap) new ResizeObserver(check).observe(wrap);
+    window.addEventListener("resize", check);
+  })();
 
   /* ---------- confirm dialog ---------- */
   function askConfirm(o) {
@@ -1615,7 +1885,7 @@
   $("stopBtn").addEventListener("click", function () { if (stopFn) stopFn(); });
   $("newChat").addEventListener("click", function () {
     if (!api) { toast("One moment, still loading."); return; }
-    newChat().then(focusInput); // the chat you leave keeps working in the background
+    newChat().then(freshStart); // the chat you leave keeps working in the background
   });
   $("attachBtn").addEventListener("click", function () { $("fileIn").click(); });
   $("fileIn").addEventListener("change", function () { addFiles($("fileIn").files); $("fileIn").value = ""; focusInputSoon(); });
@@ -2025,10 +2295,9 @@
 
   // mode picker (Hermes model-menu style): menu items .click() the hidden real pills, so the app logic is unchanged
   var DESC = {
-    claude: "Everyday work, hands tasks to the builder",
-    auto: "Fast local answer, escalates if needed",
+    claude: "Smart and thorough, hands tasks to the builder",
+    auto: "Fast, no thinking, hands tasks to the builder",
     qwen: "Runs only on this PC, free",
-    big: "Plans and builds larger projects",
     polish: "One careful design and quality pass"
   };
   var pills = $("pills"), modeBtn = $("modeBtn"), modeLabel = $("modeLabel"), menu = $("modeMenu"), kb = -1;

@@ -134,3 +134,21 @@ def claude_step(line):
             return _done("plan", "Planning the steps")
         return _done("work", "Working on it")
     return None
+
+
+HOUSEKEEPING = ("ToolSearch", "TodoWrite")  # internal bookkeeping: never shown as a step
+
+
+def housekeeping_calls(line):
+    """(only_housekeeping, ids) for a stream-json assistant line: True when every tool call in it is internal
+    bookkeeping, plus the ids of those calls (so their results can be hidden too)."""
+    try:
+        obj = json.loads(line)
+        msg = obj.get("message") if isinstance(obj, dict) and obj.get("type") == "assistant" else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"] if isinstance(content, list) else []
+    except Exception:
+        return False, []
+    ids = [b.get("id") for b in blocks if b.get("name") in HOUSEKEEPING and isinstance(b.get("id"), str)]
+    return bool(blocks) and all(b.get("name") in HOUSEKEEPING for b in blocks), ids
+

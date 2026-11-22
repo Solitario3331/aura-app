@@ -109,3 +109,13 @@ def claude_result(line) -> str:
         return clip("\n".join(p for p in parts if p), MAX_OUT)
     except Exception:
         return ""
+
+
+def result_tool_ids(line) -> list:
+    """The tool_use ids that a stream-json "user" line carries results for."""
+    try:
+        return [b.get("tool_use_id") for b in _blocks(line, "user")
+                if b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str)]
+    except Exception:
+        return []
+

@@ -1,5 +1,6 @@
 import json
 from aura_mask import mask_names
+from strip_sources import strip_sources
 
 
 class Translator:
@@ -33,7 +34,7 @@ class Translator:
         for b in self._blocks:
             if b.strip() == "":
                 continue
-            parts.append(mask_names(b))
+            parts.append(strip_sources(mask_names(b)))
         return "\n\n".join(parts)
 
     def _open_block(self):
@@ -66,7 +67,7 @@ class Translator:
                     self._open_block()
                     out.append({"t": "new_bubble"})
                 self._blocks[-1] += text
-                out.append({"t": "text", "text": mask_names(self._blocks[-1])})
+                out.append({"t": "text", "text": strip_sources(mask_names(self._blocks[-1]))})
                 return out
             return []
         return []

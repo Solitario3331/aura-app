@@ -815,3 +815,77 @@ body.calm .st-glyph::before, body.calm .pg-glyph::before { animation: none; }
 
 /* the thinking line is a plain line at the end of the chat (never covers a message) */
 .working, .progress.live { position: static; box-shadow: none; }
+
+/* the hint text never wraps: it can not make the empty box taller */
+#input::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* opening screen glitches in again on a new chat */
+#messages.intro:empty::before { animation: introIn .75s var(--ease) both; }
+#messages.intro:empty::after { animation: introIn .75s .12s var(--ease) both; }
+@keyframes introIn {
+  0% { opacity: 0; transform: translateX(-16px) skewX(-8deg); filter: drop-shadow(3px 0 rgba(255,42,109,.8)) drop-shadow(-3px 0 rgba(5,217,232,.8)); }
+  35% { opacity: 1; transform: translateX(9px) skewX(6deg); }
+  55% { transform: translateX(-5px) skewX(-3deg); filter: drop-shadow(2px 0 rgba(255,42,109,.6)) drop-shadow(-2px 0 rgba(5,217,232,.6)); }
+  100% { opacity: 1; transform: none; filter: none; }
+}
+body.calm #messages.intro:empty::before, body.calm #messages.intro:empty::after { animation: none; }
+@media (prefers-reduced-motion: reduce) { #messages.intro:empty::before, #messages.intro:empty::after { animation: none; } }
+
+/* centred start screen: on an empty chat the box sits in the middle, like Claude */
+#main.is-empty { justify-content: center; }
+#main.is-empty #topstrip { position: absolute; top: 0; left: 0; right: 0; }
+#main.is-empty #messages { flex: 0 0 auto; overflow: visible; padding: 0 var(--gutter); }
+#main.is-empty #messages:empty::before, #main.is-empty #messages:empty::after { left: 0; }
+#main.is-empty #messages:empty::before { margin: 0 auto; }
+#main.is-empty #composerWrap { padding-top: var(--s7); }
+
+/* slash command menu + side card */
+#slashMenu { position: fixed; z-index: 9000; max-height: 300px; overflow-y: auto; background: var(--overlay); border: 1px solid var(--line2);
+  box-shadow: 0 -12px 32px rgba(0,0,0,.55); }
+.sl-item { display: flex; align-items: baseline; gap: 16px; padding: 8px 14px; cursor: pointer; }
+.sl-item.sel, .sl-item:hover { background: linear-gradient(90deg, rgba(71,71,255,.24), rgba(71,71,255,.04) 80%); box-shadow: inset 2px 0 var(--acc); }
+.sl-n { flex: none; font-family: var(--mono); font-size: 12.5px; color: var(--hi); white-space: nowrap; }
+.sl-d, .sl-d2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--dim); }
+.side-card { margin-bottom: 10px; border: 1px solid var(--line2); border-left: 2px solid var(--acc); background: var(--panel); }
+.sc-head { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--line);
+  font-family: var(--mono); font-size: var(--fs-label); letter-spacing: .22em; text-transform: uppercase; color: var(--dim); }
+.sc-x { width: 24px; height: 24px; display: grid; place-items: center; font-size: 16px; line-height: 1; color: var(--dim); background: none; }
+.sc-x:hover { color: var(--hi); background: var(--hover); }
+.sc-body { max-height: 260px; overflow-y: auto; padding: 10px 12px; font-size: 14px; line-height: 1.6; color: var(--text); }
+.sc-q { margin-bottom: 8px; font-size: 13px; color: var(--user-text); }
+.sc-a.wait { color: var(--dim); }
+.sc-a.wait::after { content: "_"; margin-left: 2px; animation: blink 1s steps(1, end) infinite; }
+.sc-row { display: flex; align-items: baseline; gap: 16px; padding: 3px 0; }
+.sc-row .sl-n { min-width: 15ch; }
+
+/* start page: idea buttons (shown only on an empty chat) */
+#startChips { display: none; }
+#main.is-empty #startChips { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 22px; }
+.start-chip svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+/* start page (cyberpunk): wordmark, greeting, a larger glowing box, idea buttons */
+#startGreet { display: none; }
+#main.is-empty #startGreet { display: block; text-align: center; margin: 30px 0 26px; }
+#startGreet h1 { font-family: var(--sans); font-weight: 500; font-size: clamp(28px, 3.4vw, 40px); line-height: 1.12; letter-spacing: -.015em; color: var(--hi); }
+#startGreet p { margin-top: 9px; font-size: 15px; color: var(--mute); }
+#main.is-empty #messages:empty::before { font-size: 30px; text-shadow: 0 0 34px rgba(71,71,255,.4); margin: 0 auto; }
+#main.is-empty #messages:empty::after { margin: 14px auto 0; }
+#main.is-empty #composer { min-height: 98px; padding: 14px 12px 12px 18px; border-color: var(--line3);
+  box-shadow: 0 22px 60px -24px rgba(71,71,255,.45), inset 0 0 0 1px rgba(255,255,255,.02); }
+#main.is-empty #composer:focus-within { border-color: rgba(123,140,255,.6); box-shadow: 0 0 0 3px var(--acc-glow), 0 22px 60px -24px rgba(71,71,255,.55); }
+#main.is-empty #input { min-height: 54px; font-size: 16px; }
+#main.is-empty #pillHint, #main.is-empty #hint { display: none; }
+#main.is-empty .mode-row { margin-bottom: var(--s3); }
+.start-chip { display: inline-flex; align-items: center; gap: 9px; height: 34px; padding: 0 15px; border: 1px solid var(--line2); background: transparent; color: var(--mute);
+  font-family: var(--mono); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; }
+.start-chip:hover { color: var(--hi); border-color: var(--acc); background: var(--acc-soft); box-shadow: 0 0 16px var(--acc-glow); }
+.start-chip:focus-visible { outline-offset: 2px; }
+
+/* start page: no typing line (the greeting says it), text at the top of the box, buttons at the bottom corner */
+#main.is-empty #messages:empty::after { display: none; }
+#main.is-empty #composer { align-items: flex-start; }
+#main.is-empty #attachBtn, #main.is-empty #sendBtn, #main.is-empty #stopBtn { align-self: flex-end; }
+
+/* a new chat: greeting and idea buttons ease in after the AURA word */
+#messages.intro ~ #composerWrap #startGreet, #messages.intro ~ #composerWrap #startChips { animation: rise .6s .15s var(--ease) both; }
+body.calm #messages.intro ~ #composerWrap #startGreet, body.calm #messages.intro ~ #composerWrap #startChips { animation: none; }

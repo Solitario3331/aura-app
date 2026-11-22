@@ -43,8 +43,8 @@ from aura_mask import mask_names
 from chat_context import build_context, strip_tag
 from frame_policy import can_embed
 from site_finder import newest_html
-from step_text import claude_step
-from detail_text import clip as clip_detail, claude_detail, claude_result, MAX_DETAIL, MAX_OUT
+from step_text import claude_step, housekeeping_calls
+from detail_text import clip as clip_detail, claude_detail, claude_result, result_tool_ids, MAX_DETAIL, MAX_OUT
 from tool_kind import tool_kind_from_line
 from url_input import normalize_input
 
@@ -59,13 +59,14 @@ CTL_FILE = ROOT / "logs" / "aura_ctl.json"
 RESTART_READY = ROOT / "logs" / "aura_restart_ready.txt"   # the new Aura writes this once it has started fine
 RESTART_WAIT_SECONDS = 45               # how long the old Aura waits for the new one before giving up
 
-AURA_MODEL = "claude-haiku-5-5"         # Aura mode (streaming chat)
-HELPER_MODEL = "claude-sonnet-5-5"      # Big project, and Quick mode when the local helper fails
+AURA_MODEL = "claude-sonnet-5-5"        # Aura mode: Sonnet + the local helper (streaming chat)
+QUICK_MODEL = "claude-haiku-5-5"        # Quick mode: Haiku + the local helper (streaming chat, never thinks)
+HELPER_MODEL = "claude-sonnet-5-5"      # old one-shot Quick fallback (kept for the job path)
 POLISH_MODEL = "claude-opus-5-5"        # Polish mode
 THINK_LEVELS = ("off", "low", "medium", "high")
 _THINK = {"level": "medium"}            # the Thinking switch in the page (saved by the page, sent on start)
 
-MODES = ("claude", "qwen", "auto", "big", "polish")
+MODES = ("claude", "qwen", "auto", "polish")
 IDLE_STOP_SECONDS = 20 * 60             # stop a chat's background process after 20 idle minutes
 FILLER_STEPS = ("working on it", "working on this", "completed a task", "on it")  # never shown as a step line
 LOCAL_TIMEOUT = 15 * 60                # Local/Quick: no answer after 15 minutes -> stop and say so
@@ -114,10 +115,18 @@ AURA_PERSONA = " ".join((
     "To open a website, use do.bat (it opens the site inside Aura); never start a browser yourself.",
     "Open a website ONLY when the user asks to browse, open a site or look something up online;",
     "for 'show me', 'give me' or any request for information, a recipe or an answer, write the answer in the chat.",
+    "For facts that may be recent, specific or easy to get wrong (news, shows, films, books, people, prices, versions,",
+    "sports results, anything you are not sure about), look them up on the web first and answer from what you found;",
+    "say in plain words that you checked online. Never answer such facts from memory when you could check.",
+    "If the user wants no spoilers, still check, but only report what they asked for.",
+    "Never explain why you did or did not look something up, never say you answered from memory or training,",
+    "and never describe your tools or how you work; just give the answer.",
+    "NEVER end an answer with a list of sources, links, references or citations, and do not put links in the answer",
+    "unless the user asks for a link.",
 ))
 
 AURA_ALLOWED = [
-    "Read", "Glob", "Grep",
+    "Read", "Glob", "Grep", "WebSearch", "WebFetch",
     "Bash(do.bat:*)", "Bash(./do.bat:*)", "Bash(cmd.exe /c do.bat:*)",
     "PowerShell(.\\do.bat:*)", "PowerShell(do.bat:*)", "PowerShell(cmd /c do.bat:*)",
     "Bash(python runner.py:*)", "Bash(.venv/Scripts/python.exe runner.py:*)",
@@ -1107,10 +1116,6 @@ class Api:
             if reply.startswith("Error:"):
                 return reply[6:].strip() or TRY_AGAIN, "App"
             return reply, who
-        if mode == "big":
-            return self._one_shot(
-                "BIG PROJECT. Follow the CLAUDE.md workflow (specs, tests, runner.py, Qwen for small pieces): " + text,
-                HELPER_MODEL, "Claude", None, CLAUDE_TIMEOUTS["big"], stop)
         if mode == "polish":
             return self._polish(sid, text, stop)
         return self._one_shot(text, AURA_MODEL, "Claude", _claude_session(sid), CLAUDE_TIMEOUTS["claude"], stop)
@@ -1514,6 +1519,28 @@ class Api:
         except Exception as exc:
             _log("closing windows before restart: " + repr(exc))
 
+    def btw(self, sid, question) -> dict:
+        """/btw: a quick side question. The fast model answers it with the chat as background; nothing is saved
+        into the chat, no tools that change things are allowed, and work in progress is not disturbed."""
+        q = str(question or "").strip()[:2000]
+        if not q:
+            return {"ok": False, "error": "Type your question after /btw."}
+        try:
+            context = _history(str(sid)) if str(sid).isalnum() else ""
+            prompt = ("SIDE QUESTION. Answer in a few short, plain sentences. Do not run any command, do not change "
+                      "any file and do not start any work.\n\n"
+                      + (("What was said so far in this chat (for background only):\n" + context + "\n") if context else "")
+                      + "Side question: " + q)
+            reply = run_claude(prompt, QUICK_MODEL, ["--disallowedTools", "Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit"], 120, None, "off")
+            if reply is None:
+                return {"ok": False, "error": NOT_SET_UP}
+            if reply in (TRY_AGAIN, NOT_SIGNED_IN) or reply.startswith("Aura took too long"):
+                return {"ok": False, "error": reply}
+            return {"ok": True, "text": reply}
+        except Exception as exc:
+            _log("btw failed: " + repr(exc))
+            return {"ok": False, "error": TRY_AGAIN}
+
     def set_think(self, level) -> dict:
         """The page's Thinking switch: off / low / medium / high (applies from the next message)."""
         level = str(level or "").lower()
@@ -1527,14 +1554,18 @@ class Api:
         return v
 
     # ---- Aura mode: one streaming background process per chat ----
-    def _claude_proc(self, sid):
-        """The chat's running process, started if needed. Returns its state dict, or None."""
+    def _claude_proc(self, sid, mode="claude"):
+        """The chat's running process, started if needed. Returns its state dict, or None.
+        mode "claude" = Aura (Sonnet, the Thinking switch applies); "auto" = Quick (Haiku, never thinks).
+        Switching between them restarts the process; the same conversation is resumed."""
+        model = QUICK_MODEL if mode == "auto" else AURA_MODEL
+        level = "off" if mode == "auto" else _THINK["level"]
         with self._chats_lock:
             st = self._chats.get(sid)
             if st and st["proc"].poll() is None:
-                if st.get("think") == _THINK["level"] or st.get("busy"):
+                if (st.get("model") == model and st.get("think") == level) or st.get("busy"):
                     return st
-                _kill_tree(st["proc"])  # the Thinking level changed: restart it (the same conversation is resumed)
+                _kill_tree(st["proc"])  # the mode or Thinking level changed: restart it (the same conversation is resumed)
                 self._chats.pop(sid, None)
             exe = shutil.which("claude")
             if not exe:
@@ -1542,19 +1573,19 @@ class Api:
                 return None
             cmd = ([exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                     "--verbose", "--include-partial-messages", "--permission-mode", "bypassPermissions",
-                    "--model", AURA_MODEL, "--append-system-prompt", AURA_PERSONA,
+                    "--model", model, "--append-system-prompt", AURA_PERSONA,
                     "--disallowedTools", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
-                   + _effort_args() + _claude_session(sid))
+                   + _effort_args(level) + _claude_session(sid))
             try:
                 proc = subprocess.Popen(
-                    cmd, cwd=str(ROOT), env=_clean_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    cmd, cwd=str(ROOT), env=_clean_env(level), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", **_hidden())
             except OSError as exc:
                 _log("could not start chat process: " + repr(exc))
                 return None
             st = {"proc": proc, "events": [], "live": [], "lock": threading.Lock(), "stopped": False,
-                  "busy": False, "last": time.time(), "started": time.time(), "phase": "think", "mode": "claude",
-                  "tr": Translator(), "noise": [], "think": _THINK["level"]}
+                  "busy": False, "last": time.time(), "started": time.time(), "phase": "think", "mode": mode,
+                  "tr": Translator(), "noise": [], "think": level, "model": model}
             self._chats[sid] = st
             if not self._reaper_on:
                 self._reaper_on = True
@@ -1599,10 +1630,18 @@ class Api:
                     ev["kind"] = (label or {}).get("kind") or kind or "work"
                     ev["text"] = (label or {}).get("text") or CHIP_TEXT.get(ev["kind"], "Completed a task")
                     ev["detail"] = claude_detail(line)
+            if '"tool_use"' in line:  # internal bookkeeping calls (like loading a tool) are not steps the user cares about
+                only_hk, hk_ids = housekeeping_calls(line)
+                if hk_ids:
+                    st.setdefault("skip_ids", set()).update(hk_ids)
+                if only_hk:
+                    events = [e for e in events if e.get("t") != "tool"]
             if not events and '"tool_result"' in line:  # what a tool printed (Details view)
-                out = claude_result(line)
-                if out:
-                    events.append({"t": "result", "out": out})
+                ids = result_tool_ids(line)
+                if not (ids and all(i in st.get("skip_ids", ()) for i in ids)):
+                    out = claude_result(line)
+                    if out:
+                        events.append({"t": "result", "out": out})
             return events
 
         try:
@@ -1665,7 +1704,7 @@ class Api:
         """Send the same message again to a fresh process (once). The page keeps polling this chat and
         simply sees the new process's events."""
         _log("chat {}: saved conversation was gone, sending the message to a fresh one".format(sid))
-        st = self._claude_proc(sid)
+        st = self._claude_proc(sid, old.get("mode", "claude"))
         err = NOT_SET_UP if st is None else None
         if st is not None:
             try:
@@ -1801,7 +1840,7 @@ class Api:
                                                "data": im["data"]}} for im in images]
         return blocks + [{"type": "text", "text": text or "What is in this picture?"}], bool(carried)
 
-    def chat_send(self, sid, text, images=None) -> dict:
+    def chat_send(self, sid, text, images=None, mode="claude") -> dict:
         try:
             sid = str(sid)
             if self._chat_working(sid):
@@ -1816,7 +1855,7 @@ class Api:
                 _log("could not save user message: " + repr(exc))
             st = None
             for attempt in (1, 2):  # one automatic retry: if the process died, start a fresh one
-                st = self._claude_proc(sid)
+                st = self._claude_proc(sid, "auto" if mode == "auto" else "claude")
                 if st is None:
                     self._save_answer(sid, NOT_SET_UP, "App")
                     return {"ok": False, "error": NOT_SET_UP}
