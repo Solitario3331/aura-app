@@ -231,9 +231,7 @@ def open_in_aura(url: str) -> str:
             return "Opened in the Aura browser: " + shown
     except Exception as exc:
         log("open_in_aura failed: " + repr(exc))
-    import webbrowser
-    webbrowser.open(Path(params["path"]).as_uri() if "path" in params else params["url"])
-    return "The Aura browser was not available, so it was opened in the normal browser: " + shown
+    return "The Aura browser is not available right now, so nothing was opened (the normal browser is never used): " + shown
 
 
 # ---- tools ----

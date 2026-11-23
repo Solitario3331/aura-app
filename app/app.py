@@ -112,7 +112,7 @@ AURA_PERSONA = " ".join((
     "When you need the user to choose between options, do NOT use any question tool. Write the question, then",
     "a block exactly like:\n```choices\nOption one\nOption two\nOption three\n```\nOne option per line, 2 to 5 options;",
     "the user taps one and it comes back as their next message.",
-    "To open a website, use do.bat (it opens the site inside Aura); never start a browser yourself.",
+    "To open a website, use do.bat (it opens the site inside Aura); never start a browser yourself. A website you built is ALREADY shown in the Aura preview pane: never open it in the normal browser, never run start/Start-Process/explorer on it, and do not say it was opened in the browser unless the user asked.",
     "Open a website ONLY when the user asks to browse, open a site or look something up online;",
     "for 'show me', 'give me' or any request for information, a recipe or an answer, write the answer in the chat.",
     "For facts that may be recent, specific or easy to get wrong (news, shows, films, books, people, prices, versions,",
@@ -131,7 +131,6 @@ AURA_ALLOWED = [
     "PowerShell(.\\do.bat:*)", "PowerShell(do.bat:*)", "PowerShell(cmd /c do.bat:*)",
     "Bash(python runner.py:*)", "Bash(.venv/Scripts/python.exe runner.py:*)",
     "PowerShell(.venv\\Scripts\\python.exe runner.py:*)",
-    "PowerShell(Start-Process:*)", "PowerShell(start:*)", "Bash(start:*)", "Bash(cmd.exe /c start:*)",
 ]
 ONE_SHOT_ALLOWED = ["Bash(do.bat:*)", "Bash(python runner.py:*)", "Bash(.venv/Scripts/python.exe runner.py:*)"]
 
