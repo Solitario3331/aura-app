@@ -1055,3 +1055,16 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
 #appMenuBtn:hover svg, #appMenuBtn[aria-expanded="true"] svg { stroke: var(--acc-text, var(--hi)); }
 #sidebar .foot #settingsBtn { display: none; } /* Settings lives in the menu now */
 #railSettings { display: none; }
+
+/* live reminder (front page only) */
+#reminder { display: none; }
+#main.is-empty #reminder:not([hidden]) { display: flex; align-items: center; gap: 10px; position: absolute; top: calc(var(--strip) + 6px); left: 50%; transform: translateX(-50%); z-index: 5;
+  max-width: min(560px, calc(100% - 48px)); padding: 9px 8px 9px 14px; border: 1px solid var(--line2); border-radius: 10px; background: var(--overlay); color: var(--text);
+  font-size: 13.5px; line-height: 1.4; box-shadow: 0 8px 28px rgba(0,0,0,.35); animation: rmIn .35s ease both; }
+#reminder::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); }
+#reminder .rm-text { min-width: 0; overflow-wrap: anywhere; }
+#reminder .rm-x { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--dim); }
+#reminder .rm-x:hover { color: var(--hi); background: var(--hover); }
+#reminder .rm-x svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+@keyframes rmIn { from { opacity: 0; transform: translate(-50%, -6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@media (prefers-reduced-motion: reduce) { #reminder { animation: none !important; } }

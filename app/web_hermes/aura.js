@@ -1768,6 +1768,29 @@
   $("tsDrag").addEventListener("mousedown", dragWin);
   $("tsDrag").addEventListener("dblclick", toggleMax);
 
+  /* ---- live reminder on the front page (read from the update repo, so no new version is needed) ---- */
+  (function () {
+    var box = $("reminder"); if (!box) return;
+    var txt = box.querySelector(".rm-text"), seenKey = "auraReminderSeen", cur = { id: "", text: "" }, last = 0;
+    function seen() { try { return localStorage.getItem(seenKey) || ""; } catch (e) { return ""; } }
+    function render() { var on = !!(cur.text && cur.id !== seen()); box.hidden = !on; if (on) txt.textContent = cur.text; }
+    box.querySelector(".rm-x").addEventListener("click", function () {
+      try { localStorage.setItem(seenKey, cur.id); } catch (e) { /* ignore */ }
+      render();
+    });
+    function load() {
+      if (!api || !api.get_reminder) return;
+      last = Date.now();
+      api.get_reminder().then(function (r) {
+        if (!r) return;
+        cur = { id: String(r.id || ""), text: String(r.text || "") };
+        render();
+      }).catch(noop);
+    }
+    setInterval(function () { if (api && Date.now() - last > 300000) load(); }, 15000); // first read as soon as the app is ready, then every 5 minutes
+    window.addEventListener("focus", function () { if (Date.now() - last > 60000) load(); });
+  })();
+
   /* ---- app menu (top-left): the same things a File / Help menu would hold ---- */
   (function () {
     var btn = $("appMenuBtn"); if (!btn) return;
