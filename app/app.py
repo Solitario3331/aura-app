@@ -2260,10 +2260,38 @@ def _ensure_shortcut() -> None:
         _log("shortcut failed: " + repr(exc))
 
 
+_instance_lock = None
+
+
+def _already_running() -> bool:
+    """One Aura per install folder: if it is open already, bring that window to the front and say so."""
+    global _instance_lock
+    try:
+        import hashlib
+        k = ctypes.windll.kernel32
+        k.CreateMutexW.restype = ctypes.c_void_p
+        name = "Local\\AuraApp_" +hashlib.md5(str(ROOT).lower().encode("utf-8")).hexdigest()[:16]
+        _instance_lock = k.CreateMutexW(None, False, name)
+        if ctypes.GetLastError() != 183:  # 183 = the mutex existed already
+            return False
+        u = ctypes.windll.user32
+        hwnd = u.FindWindowW(None, "Aura")
+        if hwnd:
+            if u.IsIconic(hwnd):
+                u.ShowWindow(hwnd, 9)  # restore a minimized window
+            u.SetForegroundWindow(hwnd)
+        return True
+    except Exception as exc:
+        _log("single-instance check failed: " + repr(exc))
+        return False
+
+
 def main() -> None:
     import webview
 
     updated = _wait_for_old_aura(sys.argv[1:])  # after an update: let the old window close first
+    if _already_running():
+        return
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)  # before any window exists
     except Exception:
