@@ -1031,3 +1031,8 @@ body.calm .upd-bar i { width: 100%; opacity: .5; }
 @media (min-width: 861px) and (max-width: 1400px) {
   body:has(#preview.open) #hint { display: none; }
 }
+
+/* answers carry no "Aura" label/avatar above them, so the text sits flush left like the rest of the thread */
+.msg.assistant > .badge { display: none; }
+.msg.assistant .bubble { padding-left: 0; }
+.msg.assistant .bubble.error { margin-left: 0; }

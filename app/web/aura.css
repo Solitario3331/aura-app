@@ -814,3 +814,6 @@ body.calm .session.active::after { display: none; }
 body.calm #preview.loading .pv-progress::before { transform: none; width: 100%; opacity: .6; }
 body.calm .upd-ring { border-color: var(--acc); opacity: .7; }
 body.calm .upd-bar i { width: 100%; opacity: .55; box-shadow: none; }
+
+/* answers carry no "AURA" label above them: they simply read as the answer */
+.msg.assistant > .badge { display: none; }
