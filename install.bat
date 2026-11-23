@@ -4,6 +4,9 @@ cd /d "%~dp0"
 title Install Aura
 echo ==== Install Aura (run this once) ====
 echo.
+set WHERE=1
+set LOOK=1
+if defined AURA_WHERE goto presetanswers
 echo Where should the free helper (Qwen) run?
 echo   1 = on Amar's PC over the home network (this PC has no big graphics card)
 echo   2 = on this PC (needs Ollama and a big graphics card)
@@ -16,6 +19,13 @@ echo   2 = Professional
 set LOOK=1
 set /p LOOK=Type 1 or 2 and press Enter [1]:
 echo.
+goto answersdone
+:presetanswers
+set WHERE=%AURA_WHERE%
+if defined AURA_LOOK set LOOK=%AURA_LOOK%
+echo Using the answers from the installer you started.
+echo.
+:answersdone
 
 echo STEP 1 of 5: Python
 python --version >nul 2>&1
